@@ -80,6 +80,17 @@ Langchain_RAG_Django_React/
 │   ├── enterprise_assistant/    # 企業知識庫檢索模組
 │   └── api/                     # RESTful API 定義
 ├── frontend/                    # React 前端
+│   ├── package.json            # 專案依賴與指令定義
+│   ├── public/                 # 公共靜態資源（如 index.html）
+│   ├── src/                    # React 源始碼
+│   │   ├── App.js              # 應用程式主組件
+│   │   ├── App.test.js         # 測試檔案
+│   │   ├── index.js            # React 入口點
+│   │   └── components/         # 元件資料夾
+│   │       ├── EnterpriseQuery.jsx     # 企業知識問答元件
+│   │       ├── KnowledgeManager.jsx    # 文件管理與知識建立功能
+│   │       ├── PdfViewer.jsx           # PDF 預覽與嵌入顯示
+│   │       └── UserQuery.jsx           # 使用者端問答元件
 ├── .env.example                 # 環境變數範例
 ├── .gitignore
 ├── requirements.txt
