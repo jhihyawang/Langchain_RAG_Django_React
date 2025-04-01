@@ -12,8 +12,8 @@
 | 後端 | Django + Django REST Framework |
 | RAG 架構 | LangChain |
 | 向量資料庫 | ChromaDB |
-| 詞嵌入模型 | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` |
-| LLM | OpenAI GPT-4o、Meta LLaMA3.3 70B via HuggingFace API |
+| 詞嵌入模型 | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`  via HuggingFace API |
+| LLM | OpenAI GPT-4o、Meta LLaMA3.3 70B via Github API |
 | 文件處理 | PyMuPDF、PIL、表格解析（如 pandas、pdfplumber） |
 
 ---
