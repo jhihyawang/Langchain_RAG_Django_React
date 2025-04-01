@@ -8,11 +8,11 @@
 
 | 元件 | 技術 |
 |------|------|
-| 前端 | React (支援多模態輸入與顯示) |
+| 前端 | React（支援多模態輸入與顯示） |
 | 後端 | Django + Django REST Framework |
 | RAG 架構 | LangChain |
 | 向量資料庫 | ChromaDB |
-| 詞嵌入模型 | sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 |
+| 詞嵌入模型 | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` |
 | LLM | OpenAI GPT-4o、Meta LLaMA3.3 70B via HuggingFace API |
 | 文件處理 | PyMuPDF、PIL、表格解析（如 pandas、pdfplumber） |
 
@@ -37,29 +37,43 @@
 ```bash
 git clone https://github.com/jhihyawang/Langchain_RAG_Django_React.git
 cd Langchain_RAG_Django_React
+```
 
 ### ✅ 2. 後端（Django）
 
+```bash
 python -m venv venv
-source venv/bin/activate  # Windows 使用 venv\Scripts\activate
+source venv/bin/activate        # Windows 請使用 venv\Scripts\activate
 pip install -r requirements.txt
+```
 
 ### ✅ 3. 資料庫遷移與啟動
 
+```bash
 python manage.py makemigrations
 python manage.py migrate
 python manage.py runserver
-後端將啟動於：http://127.0.0.1:8000
+```
+
+後端將啟動於：<http://127.0.0.1:8000>
+
+---
 
 ### ✅ 4. 前端（React）
 
+```bash
 cd frontend
 npm install
 npm start
-前端將運行於：http://localhost:3000
+```
 
+前端將運行於：<http://localhost:3000>
+
+---
 
 ## 📁 專案結構
+
+```
 Langchain_RAG_Django_React/
 ├── backend/                      # Django 專案（rag_project）
 │   ├── general_assistant/       # 通用型助手
@@ -70,10 +84,10 @@ Langchain_RAG_Django_React/
 ├── .gitignore
 ├── requirements.txt
 └── README.md
+```
 
+---
 
-##🧑‍💻 作者
+## 🧑‍💻 作者
 
-由 @jhihyawang 製作，結合 Django、React 與 LangChain 建立文件智能問答助理系統。
-
-
+由 [@jhihyawang](https://github.com/jhihyawang) 製作，結合 Django、React 與 LangChain 建立文件智能問答助理系統。
