@@ -18,57 +18,6 @@ from unstructured.partition.pdf import partition_pdf
 from openai import OpenAI
 from enterprise_assistant.azure_llama_api import AzureLlamaAPI
 
-import os
-import fitz  # PyMuPDF
-import pdfplumber
-
-def classify_pdf_elements(pdf_path, image_output_dir="./images"):
-    """
-    將 PDF 中的內容分類為：文字段落、表格、圖片
-    不依賴 OCR，不需 Tesseract
-    """
-    os.makedirs(image_output_dir, exist_ok=True)
-
-    text_blocks = []
-    table_blocks = []
-    image_paths = []
-
-    # ✅ 使用 pdfplumber 提取文字和表格
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            # 文字段落
-            text = page.extract_text()
-            if text:
-                text_blocks.append({"page": page_num + 1, "content": text})
-
-            # 表格資料
-            tables = page.extract_tables()
-            for table in tables:
-                table_blocks.append({"page": page_num + 1, "content": table})
-
-    # ✅ 使用 PyMuPDF 擷取圖像
-    doc = fitz.open(pdf_path)
-    for page_index in range(len(doc)):
-        for img_index, img in enumerate(doc[page_index].get_images(full=True)):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            img_bytes = base_image["image"]
-            img_ext = base_image["ext"]
-            img_filename = f"page{page_index+1}_img{img_index+1}.{img_ext}"
-            img_path = os.path.join(image_output_dir, img_filename)
-
-            with open(img_path, "wb") as f:
-                f.write(img_bytes)
-
-            image_paths.append({"page": page_index + 1, "path": img_path})
-
-    return {
-        "texts": text_blocks,
-        "tables": table_blocks,
-        "images": image_paths
-    }
-
-
 
 # 🔹 設定 OpenAI API
 token = "#"
@@ -152,60 +101,72 @@ def add_to_user_vectorstore(file_path, title, content, page_number=1):
     return True
 
 # 解析 PDF，提取 文字 / 表格 / 圖片
+import os
+import fitz  # PyMuPDF
+import pdfplumber
+
 def extract_element_from_pdf(file_path):
     output_path = "./images"
-    
-    # 解析 PDF
-    raw_pdf_elements = partition_pdf(
-        filename=file_path,
-        extract_images_in_pdf=True,
-        infer_table_structure=True,
-        chunking_strategy="by_title",
-        max_characters=4000,
-        new_after_n_chars=3800,
-        combine_text_under_n_chars=2000,
-        extract_image_block_output_dir=output_path,
-    )
+    os.makedirs(output_path, exist_ok=True)
 
     # 儲存不同類型的元素
     text_elements, table_elements, image_elements = [], [], []
     text_summaries, table_summaries, image_summaries = [], [], []
+    table_metadata, image_metadata = [], []
 
-    # 解析文字與表格
-    for e in raw_pdf_elements:
-        if 'CompositeElement' in repr(e):
-            text_elements.append(e.text)
-            summary = summarize_text_or_table(e.text, 'text')
-            text_summaries.append(summary)
+    # ✅ 使用 pdfplumber 提取文字與表格
+    with pdfplumber.open(file_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            text = page.extract_text()
+            if text:
+                text_elements.append(text)
+                summary = summarize_text_or_table(text, 'text')
+                text_summaries.append(summary)
 
-        elif 'Table' in repr(e):
-            table_elements.append(e.text)
-            summary = summarize_text_or_table(e.text, 'table')
-            table_summaries.append(summary)
+            tables = page.extract_tables()
+            for table_index, table in enumerate(tables):
+                table_str = str(table)
+                table_elements.append(table_str)
+                summary = summarize_text_or_table(table_str, 'table')
+                table_summaries.append(summary)
+                table_metadata.append({"page": page_num + 1, "content": table_str})
 
-    # 解析圖片
-    for i in os.listdir(output_path):
-        if i.endswith(('.png', '.jpg', '.jpeg')):
-            image_path = os.path.join(output_path, i)
+    # ✅ 使用 PyMuPDF 提取圖片
+    doc = fitz.open(file_path)
+    for page_index in range(len(doc)):
+        for img_index, img in enumerate(doc[page_index].get_images(full=True)):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            img_bytes = base_image["image"]
+            img_ext = base_image["ext"]
+            img_filename = f"page{page_index+1}_img{img_index+1}.{img_ext}"
+            image_path = os.path.join(output_path, img_filename)
+
+            with open(image_path, "wb") as f:
+                f.write(img_bytes)
+
             image_elements.append(image_path)
             summary = summarize_image(image_path)
             image_summaries.append(summary)
+            image_metadata.append({"page": page_index + 1, "path": image_path})
 
     # 存入向量資料庫
     for e, s in zip(text_elements, text_summaries):
         add_to_user_vectorstore(file_path, "Text Element", s)
 
-    for e, s in zip(table_elements, table_summaries):
-        add_to_user_vectorstore(file_path, "Table Element", s)
+    for item, summary in zip(table_metadata, table_summaries):
+        add_to_user_vectorstore(file_path, "Table Element", summary, page_number=item["page"])
 
-    for e, s in zip(image_elements, image_summaries):
-        add_to_user_vectorstore(file_path, "Image Element", s)
+    for item, summary in zip(image_metadata, image_summaries):
+        add_to_user_vectorstore(file_path, "Image Element", summary, page_number=item["page"])
 
-    # 回傳所有摘要
+    # 回傳所有摘要與對應頁面資訊
     return {
         "text_summaries": text_summaries,
         "table_summaries": table_summaries,
-        "image_summaries": image_summaries
+        "image_summaries": image_summaries,
+        "tables": table_metadata,   # [{"page": 1, "content": "..."}]
+        "images": image_metadata    # [{"page": 2, "path": "./images/page2_img1.jpg"}]
     }
     
 
