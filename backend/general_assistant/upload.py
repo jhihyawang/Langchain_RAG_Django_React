@@ -18,6 +18,58 @@ from unstructured.partition.pdf import partition_pdf
 from openai import OpenAI
 from enterprise_assistant.azure_llama_api import AzureLlamaAPI
 
+import os
+import fitz  # PyMuPDF
+import pdfplumber
+
+def classify_pdf_elements(pdf_path, image_output_dir="./images"):
+    """
+    將 PDF 中的內容分類為：文字段落、表格、圖片
+    不依賴 OCR，不需 Tesseract
+    """
+    os.makedirs(image_output_dir, exist_ok=True)
+
+    text_blocks = []
+    table_blocks = []
+    image_paths = []
+
+    # ✅ 使用 pdfplumber 提取文字和表格
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            # 文字段落
+            text = page.extract_text()
+            if text:
+                text_blocks.append({"page": page_num + 1, "content": text})
+
+            # 表格資料
+            tables = page.extract_tables()
+            for table in tables:
+                table_blocks.append({"page": page_num + 1, "content": table})
+
+    # ✅ 使用 PyMuPDF 擷取圖像
+    doc = fitz.open(pdf_path)
+    for page_index in range(len(doc)):
+        for img_index, img in enumerate(doc[page_index].get_images(full=True)):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            img_bytes = base_image["image"]
+            img_ext = base_image["ext"]
+            img_filename = f"page{page_index+1}_img{img_index+1}.{img_ext}"
+            img_path = os.path.join(image_output_dir, img_filename)
+
+            with open(img_path, "wb") as f:
+                f.write(img_bytes)
+
+            image_paths.append({"page": page_index + 1, "path": img_path})
+
+    return {
+        "texts": text_blocks,
+        "tables": table_blocks,
+        "images": image_paths
+    }
+
+
+
 # 🔹 設定 OpenAI API
 token = "#"
 endpoint = "https://models.inference.ai.azure.com"
