@@ -153,15 +153,31 @@ const EnterpriseQuery = () => {
                 <p className="text-muted">{loading ? "⏳ 正在產生回應..." : response}</p>
             </div>
 
-            {/* 🔹 顯示檢索到的文件 */}
-            {documents.length > 0 && (
-                <div className="mt-4">
-                    <h3>📄 檢索到的相關文件</h3>
+            {/* 🔹 顯示檢索說明與文件內容 */}
+            <div className="mt-4">
+                <h3>📄 檢索資料</h3>
+
+                {/* 情況一：未啟用檢索 */}
+                {!Retrieval && (
+                    <div className="alert alert-info">
+                        📌 <strong>未啟用向量檢索</strong>，以下回答內容為 LLM 根據自身知識生成。
+                    </div>
+                )}
+
+                {/* 情況二：啟用檢索但找不到資料 */}
+                {Retrieval && documents.length === 0 && (
+                    <div className="alert alert-warning">
+                        ⚠️ <strong>已啟用向量檢索</strong>，但未找到任何相關文件。
+                    </div>
+                )}
+
+                {/* 情況三：成功檢索到文件 */}
+                {Retrieval && documents.length > 0 && (
                     <ul className="list-group">
                         {documents.map((doc, index) => (
                             <li key={index} className="list-group-item">
                                 <strong>📌 {doc.title} (第 {doc.page_number} 頁)</strong>
-                                <p className="text-muted">{doc.content.substring(0, 150)}...</p>
+                                <p className="text-muted">{doc.content?.substring(0, 150)}...</p>
                                 <a 
                                     href={`/pdf-viewer/${doc.title}#page=${doc.page_number}`} 
                                     className="btn btn-sm btn-link" 
@@ -173,8 +189,9 @@ const EnterpriseQuery = () => {
                             </li>
                         ))}
                     </ul>
-                </div>
-            )}
+                )}
+            </div>
+
         </div>
     );
 };
