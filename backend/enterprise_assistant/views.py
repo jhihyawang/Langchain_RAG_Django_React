@@ -295,58 +295,69 @@ class KnowledgeDetailView(generics.RetrieveUpdateDestroyAPIView):
     
     
 class EnterpriseQueryView(generics.CreateAPIView):
-    """企業知識庫查詢，支援雲端/本地 LLM"""
-    
-    serializer_class = EnterpriseQuerySerializer  # 讓 Swagger 正確顯示 API 參數
+    """企業知識庫查詢，支援雲端/本地 LLM，並可選擇是否使用向量檢索"""
 
+    serializer_class = EnterpriseQuerySerializer  # 讓 Swagger 正確顯示 API 參數
     def create(self, request, *args, **kwargs):
         query = request.data.get("query")
         model_type = request.data.get("model_type", "cloud")  # 預設使用雲端 LLM
-        
+        use_retrieval = request.data.get("use_retrieval", True)  # 預設開啟檢索
+
         if not query:
             return Response({"error": "Query is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        print(f"🔍 [查詢請求] 收到查詢: {query}, 使用模型: {model_type}")
+        print(f"🔍 [查詢請求] 收到查詢: {query}, 使用模型: {model_type}, 啟用檢索: {use_retrieval}")
 
-        # ✅ 取得企業知識庫的相關文件
-        retriever = enterprise_vectorstore.as_retriever(search_kwargs={"k": 5})
-        documents = retriever.get_relevant_documents(query)
-
-        if not documents:
-            return Response({
-                "query": query,
-                "answer": "⚠️ 未找到相關內容，請重新輸入問題或提供更多細節。",
-                "retrieved_docs": []
-            }, status=status.HTTP_200_OK)
-
-        print(f"✅ [檢索結果] 找到 {len(documents)} 份文件")
-
-        # ✅ 提取 `page_number` 和 `title`
+        context = ""
         retrieved_docs = []
-        for doc in documents:
-            page_number = doc.metadata.get("page_number", "未知頁碼")
-            title = doc.metadata.get("title", "未知文件")
-            retrieved_docs.append({
-                "title": title,
-                "page_number": page_number,
-                "content": doc.page_content
-            })
 
-        # ✅ 組合 `context` 作為 LLM 參考資料
-        context = "\n\n".join([doc["content"] for doc in retrieved_docs])
+        if use_retrieval:
+            # ✅ 取得企業知識庫的相關文件
+            retriever = enterprise_vectorstore.as_retriever(search_kwargs={"k": 5})
+            documents = retriever.get_relevant_documents(query)
+
+            if not documents:
+                return Response({
+                    "query": query,
+                    "answer": "⚠️ 未找到相關內容，請重新輸入問題或提供更多細節。",
+                    "retrieved_docs": []
+                }, status=status.HTTP_200_OK)
+
+            print(f"✅ [檢索結果] 找到 {len(documents)} 份文件")
+
+            # ✅ 提取 `page_number` 和 `title`
+            for doc in documents:
+                page_number = doc.metadata.get("page_number", "未知頁碼")
+                title = doc.metadata.get("title", "未知文件")
+                retrieved_docs.append({
+                    "title": title,
+                    "page_number": page_number,
+                    "content": doc.page_content
+                })
+
+            # ✅ 組合 `context` 作為 LLM 參考資料
+            context = "\n\n".join([doc["content"] for doc in retrieved_docs])
 
         # ✅ 建立 LLM 查詢 Prompt
-        prompt = PromptTemplate(
-            template="根據以下背景資訊回答問題：\n\n{context}\n\n問題：{query}\n回答：",
-            input_variables=["context", "query"]
-        )
-        formatted_prompt = prompt.format(context=context, query=query)
+        if use_retrieval:
+            prompt = PromptTemplate(
+                template="根據以下背景資訊回答問題：\n\n{context}\n\n問題：{query}\n回答：",
+                input_variables=["context", "query"]
+            )
+            formatted_prompt = prompt.format(context=context, query=query)
+        else:
+            prompt = PromptTemplate(
+                template="請回答以下問題：\n\n問題：{query}\n回答：",
+                input_variables=["query"]
+            )
+            formatted_prompt = prompt.format(query=query)
+
         print(f"📜 [Prompt] 送入 LLM:\n{formatted_prompt[:500]}...")
 
         # ✅ 根據 `model_type` 呼叫不同 LLM
         if model_type == "cloud":
             try:
-                answer = AzureLlamaAPI.ask(formatted_prompt)  
+                answer = AzureLlamaAPI.ask(formatted_prompt)
                 print(f"🤖 [雲端 LLM 回應] {answer[:300]}...")
             except Exception as e:
                 print(f"❌ [雲端 LLM 錯誤] {str(e)}")
@@ -354,7 +365,7 @@ class EnterpriseQueryView(generics.CreateAPIView):
 
         elif model_type == "local":
             try:
-                llm = Ollama(model="openchat:latest")  # 修正語法錯誤
+                llm = Ollama(model="openchat:latest")
                 answer = llm.invoke(formatted_prompt)
                 print(f"🤖 [本地 LLM 回應] {answer[:300]}...")
             except Exception as e:
@@ -367,5 +378,5 @@ class EnterpriseQueryView(generics.CreateAPIView):
         return Response({
             "query": query,
             "answer": answer,
-            "retrieved_docs": retrieved_docs
+            "retrieved_docs": retrieved_docs if use_retrieval else []
         }, status=status.HTTP_200_OK)

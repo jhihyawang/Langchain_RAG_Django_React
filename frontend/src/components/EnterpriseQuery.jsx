@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import Switch from "react-switch";
 
 const EnterpriseQuery = () => {
     const [query, setQuery] = useState("");  // 存儲使用者輸入的問題
@@ -7,6 +8,8 @@ const EnterpriseQuery = () => {
     const [loading, setLoading] = useState(false);  // 控制讀取狀態
     const [modelType, setModelType] = useState("cloud");  // 新增模型選擇，預設為雲端 LLM
     const [isListening, setIsListening] = useState(false); // 控制語音輸入狀態
+    const [Retrieval, setIsRetrival] = useState(true);  // 預設啟用檢索
+
     let recognition = null;
 
     // 📌 初始化語音識別
@@ -67,7 +70,11 @@ const EnterpriseQuery = () => {
             const res = await fetch("http://127.0.0.1:8000/api/query_enterprise/", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ query, model_type: modelType }),  // 傳遞 `modelType`
+                body: JSON.stringify({
+                    query,
+                    model_type: modelType,
+                    use_retrieval: Retrieval
+                }),
             });
 
             const data = await res.json();
@@ -101,6 +108,26 @@ const EnterpriseQuery = () => {
                     <option value="cloud">☁️ 雲端 LLM</option>
                     <option value="local">💻 本地 LLM</option>
                 </select>
+            </div>
+            
+            <div className="mb-3 d-flex align-items-center">
+                <label className="me-3">🔁 啟用向量檢索</label>
+                <Switch
+                    onChange={(checked) => {
+                        console.log("🔁 檢索開關狀態：", checked);
+                        setIsRetrival(checked);
+                    }}
+                    checked={Retrieval}
+                    onColor="#3b82f6"        // 開啟時的藍色
+                    offColor="#d1d5db"       // 關閉時的灰色
+                    onHandleColor="#ffffff"  // 開啟時的開關顏色
+                    handleDiameter={24}
+                    uncheckedIcon={false}
+                    checkedIcon={false}
+                    height={28}
+                    width={56}
+                />
+                <span className="ms-2">{Retrieval ? "ON" : "OFF"}</span>
             </div>
 
             {/* 🔹 查詢輸入框 + 語音按鈕 */}
