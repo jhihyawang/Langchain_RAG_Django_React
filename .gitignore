@@ -1,0 +1,25 @@
+# Python venv
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Django
+db.sqlite3
+*.log
+*.env
+media/
+static/
+chroma_user_db/
+chroma_enterprise_db
+images/
+
+# 編譯快取
+*.pyc
+*.pyo
+*.pyd
+*.swp
+
+# VSCode / JetBrains
+.vscode/
+.idea/
