@@ -5,9 +5,17 @@ const KnowledgeEditPage = () => {
     const { id } = useParams();
     const navigate = useNavigate();
     const [title, setTitle] = useState("");
+    const [department, setDepartment] = useState("");
     const [chunkList, setChunkList] = useState([]);
+    const [editedChunks, setEditedChunks] = useState(new Set());
 
     useEffect(() => {
+        fetch(`http://127.0.0.1:8000/api/knowledge/${id}/`)
+            .then(res => res.json())
+            .then(data => {
+                setDepartment(data.department || "");
+            });
+
         fetch(`http://127.0.0.1:8000/api/knowledge/${id}/chunks/`)
             .then(res => res.json())
             .then(data => {
@@ -23,18 +31,21 @@ const KnowledgeEditPage = () => {
                 chunk.id === chunkId ? { ...chunk, content: newContent } : chunk
             )
         );
+        setEditedChunks((prev) => new Set(prev).add(chunkId));
     };
 
     const handleSaveAll = async () => {
         try {
             for (const chunk of chunkList) {
-                await fetch(`http://127.0.0.1:8000/api/knowledge/chunk/${chunk.id}/`, {
-                    method: "PUT",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({ content: chunk.content }),
-                });
+                if (editedChunks.has(chunk.id)) {
+                    await fetch(`http://127.0.0.1:8000/api/knowledge/chunk/${chunk.id}/`, {
+                        method: "PUT",
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({ content: chunk.content }),
+                    });
+                }
             }
             alert("✅ 所有區塊已成功更新！");
             navigate("/knowledge");
@@ -47,12 +58,14 @@ const KnowledgeEditPage = () => {
     return (
         <div className="container mt-4">
             <h3>📝 編輯文件內容（ID: {id}）</h3>
-            <p>檔案名稱：{title}</p>
+            <p><strong>檔案名稱：</strong> {title}</p>
+            <p><strong>部門：</strong> {department}</p>
 
             {chunkList.map((chunk) => (
                 <div className="card mb-3" key={chunk.id}>
-                    <div className="card-header">
-                        🧩 Chunk #{chunk.chunk_index}（第 {chunk.page_number} 頁）
+                    <div className="card-header d-flex justify-content-between">
+                        <span>🧩 Chunk #{chunk.chunk_index}（第 {chunk.page_number} 頁）</span>
+                        {editedChunks.has(chunk.id) && <span className="text-warning">已修改</span>}
                     </div>
                     <div className="card-body">
                         <textarea
