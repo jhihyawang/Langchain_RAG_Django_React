@@ -155,6 +155,51 @@ def rebuild_vectorstore():
     print(f"✅ 已成功重新載入 {len(all_documents)} 份企業知識庫文件！")
 '''
 
+from rest_framework import generics, status
+from rest_framework.response import Response
+from .models import Knowledge
+from .serializers import KnowledgeSerializer
+import os
+
+class KnowledgeChunksView(generics.RetrieveAPIView):
+    """
+    顯示特定 knowledge 文件對應的所有 chunks
+    GET /api/knowledge/<pk>/chunks/
+    """
+    queryset = Knowledge.objects.all()
+    serializer_class = KnowledgeSerializer  # 形式上需要，實際不使用
+
+    def retrieve(self, request, *args, **kwargs):
+        knowledge = self.get_object()
+        title = os.path.basename(knowledge.file.name) if knowledge.file else None
+
+        if not title:
+            return Response({"error": "無有效檔名"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            vectors = enterprise_vectorstore._collection.get(
+                where={"title": title},
+                include=["documents", "metadatas"]
+            )
+        except Exception as e:
+            return Response({"error": f"讀取向量庫失敗：{str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        chunks = []
+        for i, doc in enumerate(vectors.get("documents", [])):
+            metadata = vectors["metadatas"][i]
+            chunks.append({
+                "id": vectors["ids"][i],
+                "chunk_index": metadata.get("chunk_index", i),
+                "page_number": metadata.get("page_number", None),
+                "content": doc
+            })
+
+        return Response({
+            "title": title,
+            "chunks": chunks
+        }, status=status.HTTP_200_OK)
+
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
