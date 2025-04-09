@@ -9,7 +9,7 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Document
-        fields = ["id", "filename", "file", "content", "created_at", "updated_at", "author"]
+        fields = ["id", "filename", "file", "content", "chunk", "created_at", "updated_at", "author"]
 
     def get_filename(self, obj):
         """解析 `file` URL，取得純檔名"""
@@ -17,7 +17,7 @@ class DocumentSerializer(serializers.ModelSerializer):
             parsed_url = urllib.parse.urlparse(obj.file.url)
             return os.path.basename(urllib.parse.unquote(parsed_url.path))
         return None
-
+    
 # 定義 LLM Request 和 Response 的 Serializer
 class UserQuerySerializer(serializers.Serializer):
     query = serializers.CharField(help_text="使用者輸入的查詢問題")

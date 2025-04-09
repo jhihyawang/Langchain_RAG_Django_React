@@ -21,132 +21,16 @@ import requests
 from PIL import Image
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-
-# 向量資料庫與嵌入模型
-CHROMA_USER_DB_PATH = "chroma_user_db"
-embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-user_vectorstore = Chroma(persist_directory=CHROMA_USER_DB_PATH, embedding_function=embedder)
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
-
-def summarize_text_or_table(element, element_type):
-    if element_type == 'text':
-        return f"[{element_type.upper()} 摘要] {element}..."
-    elif element_type == 'table':
-        try:
-            prompt=f"你是一位文本處理的助手，請根據以下內容進行摘要 {element_type}:\n{element}"
-            response = ollama.chat(
-                model='gemma3:4b',
-                messages=[{
-                    'role': 'user',
-                    'content': prompt,
-                }]
-            )
-            return f"[{element_type.upper()} 摘要] {response['message']['content']}..."
-        except Exception as e:
-            return f"❌ Gemma3 表格分析錯誤: {str(e)}"
-
-def summarize_image_with_gemma3(image_path, prompt="請詳細描述這張圖片的內容，若是圖表請說明其趨勢與關鍵數據"):
-    try:
-        response = ollama.chat(
-            model='gemma3:4b',
-            messages=[{
-                'role': 'user',
-                'content': prompt,
-                'images': [image_path]
-            }]
-        )
-        return response['message']['content']
-    except Exception as e:
-        return f"❌ Gemma3 圖像分析錯誤: {str(e)}"
-
-def add_to_user_vectorstore(file_path, title, content, page_number=1):
-    if not content.strip():
-        return False
-    chunks = text_splitter.split_text(content)
-    if not chunks:
-        return False
-    metadata = [{"filename": file_path, "title": title, "chunk_index": i, "page_number": page_number} for i in range(len(chunks))]
-    user_vectorstore.add_texts(chunks, metadatas=metadata)
-    return True
-
-def retrieve_from_chroma(query):
-    retriever = user_vectorstore.as_retriever(search_kwargs={"k": 5})
-    documents = retriever.get_relevant_documents(query)
-    retrieved_docs = []
-    for doc in documents:
-        page_number = doc.metadata.get("page_number", "未知頁碼")
-        filename = doc.metadata.get("filename", "未知文件")
-        retrieved_docs.append({
-            "filename": filename,
-            "page_number": page_number,
-            "content": doc.page_content
-        })
-    return "\n\n".join([doc["content"] for doc in retrieved_docs])
-
-def extract_element_from_pdf(file_path):
-    output_path = "./images"
-    os.makedirs(output_path, exist_ok=True)
-    text_elements, table_elements, image_elements = [], [], []
-    text_summaries, table_summaries, image_summaries = [], [], []
-    table_metadata, image_metadata = [], []
-
-    with pdfplumber.open(file_path) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            if text:
-                text_elements.append(text)
-                summary = summarize_text_or_table(text, 'text')
-                print(f"processing: {page_num},text summary: {summary}")
-                text_summaries.append(summary)
-
-            tables = page.extract_tables()
-            for table_index, table in enumerate(tables):
-                table_str = str(table)
-                table_elements.append(table_str)
-                summary = summarize_text_or_table(table_str, 'table')
-                table_summaries.append(summary)
-                print(f"processing: page{page_num},table{table_index}\ntable summary: {table_summaries}")
-                table_metadata.append({"page": page_num + 1, "content": table_str})
-
-    doc = fitz.open(file_path)
-    for page_index in range(len(doc)):
-        print(f"processing:{page_index}")
-        for img_index, img in enumerate(doc[page_index].get_images(full=True)):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            img_bytes = base_image["image"]
-            img_ext = base_image["ext"]
-            img_filename = f"page{page_index+1}_img{img_index+1}.{img_ext}"
-            image_path = os.path.join(output_path, img_filename)
-
-            with open(image_path, "wb") as f:
-                f.write(img_bytes)
-
-            image_elements.append(image_path)
-            summary = summarize_image_with_gemma3(image_path)
-            print(f"{img_filename}:{summary}")
-            image_summaries.append(summary)
-            image_metadata.append({
-                "page": page_index + 1,
-                "path": image_path,
-                "summary": summary,
-                "image_name": f"圖 {page_index+1}-{img_index+1}"
-            })
-
-    for e, s in zip(text_elements, text_summaries):
-        add_to_user_vectorstore(file_path, "Text Element", s)
-    for item, summary in zip(table_metadata, table_summaries):
-        add_to_user_vectorstore(file_path, "Table Element", summary, page_number=item["page"])
-    for item in image_metadata:
-        add_to_user_vectorstore(file_path, "Image Element", item["summary"], page_number=item["page"])
-
-    return {
-        "text_summaries": text_summaries,
-        "table_summaries": table_summaries,
-        "image_summaries": image_summaries,
-        "tables": table_metadata,
-        "images": image_metadata
-    }
+import os
+from django.conf import settings
+from django.core.files.storage import default_storage
+from .rag.vectorstores import (
+    user_vectorstore,
+    add_to_general_vectorstore,
+    delete_from_general_vectorstore,
+    list_from_general_vectorstore,
+    extract_element_from_pdf
+)
 
 class AskImageView(APIView):
     @swagger_auto_schema(
@@ -209,14 +93,18 @@ class DocumentListCreateView(generics.ListCreateAPIView):
     queryset = Document.objects.all().order_by("-created_at")
     serializer_class = DocumentSerializer
     pagination_class = None
+    parser_classes = (MultiPartParser, FormParser)
     filter_backends = [filters.SearchFilter]
+    search_fields = ["file", "department"]
 
     def get(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
-        filename = request.GET.get("filename")
-        if filename:
-            queryset = queryset.filter(file__icontains=filename)
+
+        title = request.GET.get("title")
+        if title:
+            queryset = queryset.filter(file__icontains=title)
         serializer = self.get_serializer(queryset, many=True)
+
         return Response({"data": serializer.data, "count": len(serializer.data)}, status=status.HTTP_200_OK)
 
     def post(self, request, *args, **kwargs):
@@ -225,28 +113,100 @@ class DocumentListCreateView(generics.ListCreateAPIView):
 
         file = request.FILES["file"]
         author = request.data.get("author", None)
+
         document = Document.objects.create(file=file, author_id=author)
+
+        # ✅ 這裡修正錯誤用法
         file_path = document.file.path
 
-        if file.name.endswith(".pdf"):
-            extracted_summaries = extract_element_from_pdf(file_path)
-        else:
-            return Response({"error": "僅支援 PDF 檔案"}, status=status.HTTP_400_BAD_REQUEST)
+        # 解析 PDF 多模態內容並摘要 + 存入向量庫
+        summary = extract_element_from_pdf(file_path, knowledge_id=document.id)
 
-        full_summary = "\n\n".join(
-            extracted_summaries["text_summaries"] +
-            extracted_summaries["table_summaries"] +
-            [f"{img['image_name']}: {img['summary']}" for img in extracted_summaries["images"]]
-        )
+        # 從向量庫取得摘要內容
+        chunks = list_from_general_vectorstore(document.id)
+        first_chunk = chunks[0]["content"] if chunks else ""
 
-        document.content = full_summary
+        document.content = first_chunk
+        document.chunk = len(chunks)
         document.save()
 
         return Response(DocumentSerializer(document).data, status=status.HTTP_201_CREATED)
 
+
 class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
+    parser_classes = (MultiPartParser, FormParser)
+
+    def put(self, request, *args, **kwargs):
+        document = self.get_object()
+        document_id = document.id
+        old_title = os.path.basename(document.file.name) if document.file else f"manual_{document_id}"
+
+        if request.content_type.startswith("application/json"):
+            content = request.data.get("content")
+            department = request.data.get("department", document.department)
+
+            document.content = content or ""
+            document.department = department
+            document.save()
+
+            delete_from_general_vectorstore(document_id=document_id)
+            add_to_general_vectorstore(old_title, document.content, document_id=document_id)
+
+            print(f"✅ [JSON 更新] 已更新 ID={document_id} 並同步向量庫")
+            return Response(DocumentSerializer(document).data, status=status.HTTP_200_OK)
+
+        if "file" not in request.FILES:
+            return Response({"error": "請上傳新文件"}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_file_path = os.path.join(settings.MEDIA_ROOT, document.file.name) if document.file else None
+
+        new_file = request.FILES["file"]
+        temp_file_path = os.path.join(settings.MEDIA_ROOT, "temp_" + new_file.name)
+        with default_storage.open(temp_file_path, 'wb+') as destination:
+            for chunk in new_file.chunks():
+                destination.write(chunk)
+
+        response = self.update(request, *args, **kwargs)
+        document.refresh_from_db()
+
+        if old_file_path and os.path.exists(old_file_path):
+            os.remove(old_file_path)
+            print(f"🗑 已刪除舊文件: {old_file_path}")
+
+        new_file_path = document.file.path
+        if new_file.name.endswith(".pdf"):
+            extracted_pages = extract_text_from_pdf_with_pages(new_file_path)
+        else:
+            extracted_pages = [(1, extract_text_from_file(new_file_path))]
+
+        new_content = "\n\n".join([text for _, text in extracted_pages])
+        document.content = new_content
+        document.save()
+
+        delete_from_general_vectorstore(document_id=document_id)
+
+        for page_number, page_content in extracted_pages:
+            add_to_general_vectorstore(document.file.name, page_content, page_number, document_id=document_id)
+
+        print(f"✅ [檔案更新] 已更新 ID={document_id} 並同步向量庫")
+        return response
+
+    def delete(self, request, *args, **kwargs):
+        document = self.get_object()
+        file_path = os.path.join(settings.MEDIA_ROOT, document.file.name) if document.file else None
+        document_id = document.id
+
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            print(f"🗑 已刪除本地檔案: {file_path}")
+
+        delete_from_general_vectorstore(document_id=document_id)
+
+        response = super().delete(request, *args, **kwargs)
+
+        return response
 
 class UserQueryView(APIView):
     def post(self, request):
