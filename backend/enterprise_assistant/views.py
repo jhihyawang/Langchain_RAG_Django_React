@@ -155,6 +155,57 @@ def rebuild_vectorstore():
     print(f"✅ 已成功重新載入 {len(all_documents)} 份企業知識庫文件！")
 '''
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+
+class ChunkUpdateView(APIView):
+    """
+    更新單一 chunk 的內容，並重新存入向量資料庫
+    PUT /api/knowledge/chunk/<chunk_id>/
+    """
+
+    def put(self, request, chunk_id):
+        new_content = request.data.get("content")
+        if not new_content:
+            return Response({"error": "請提供新的內容"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # 1️⃣ 查詢舊 metadata
+            old_data = enterprise_vectorstore._collection.get(
+                ids=[chunk_id],
+                include=["metadatas"]
+            )
+            if not old_data["metadatas"]:
+                return Response({"error": "找不到對應 chunk"}, status=status.HTTP_404_NOT_FOUND)
+
+            old_metadata = old_data["metadatas"][0]
+            title = old_metadata.get("title")
+            chunk_index = old_metadata.get("chunk_index", 0)
+            page_number = old_metadata.get("page_number", 1)
+
+            # 2️⃣ 刪除原向量
+            enterprise_vectorstore._collection.delete(ids=[chunk_id])
+
+            # 3️⃣ 加入新向量
+            enterprise_vectorstore.add_texts(
+                [new_content],
+                metadatas=[{
+                    "title": title,
+                    "chunk_index": chunk_index,
+                    "page_number": page_number,
+                }]
+            )
+
+            print(f"✅ Chunk {chunk_id} 已更新：title={title}, index={chunk_index}")
+
+            return Response({"message": "已更新 chunk"}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            print(f"❌ Chunk 更新失敗: {str(e)}")
+            return Response({"error": f"向量更新失敗：{str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class KnowledgePagination(pagination.PageNumberPagination):
     """RESTful API 標準分頁"""
     page_size = 10  # 預設每頁 10 筆
@@ -230,51 +281,72 @@ class KnowledgeDetailView(generics.RetrieveUpdateDestroyAPIView):
     parser_classes = (MultiPartParser, FormParser)
 
     def put(self, request, *args, **kwargs):
-        """更新知識文件，刪除舊文件並更新向量資料庫"""
-
+        """更新知識文件
+        - 若為 JSON：只更新 content + department
+        - 若為檔案：照舊更新 file + content
+        - 不論哪種情況，都同步更新向量資料庫
+        """
         knowledge = self.get_object()
+        old_title = os.path.basename(knowledge.file.name) if knowledge.file else f"manual_{knowledge.id}"
 
+        # ✅ JSON 格式（手動編輯）
+        if request.content_type.startswith("application/json"):
+            content = request.data.get("content")
+            department = request.data.get("department", knowledge.department)
+
+            knowledge.content = content or ""
+            knowledge.department = department
+            knowledge.save()
+
+            # ✅ 同步更新向量資料庫
+            delete_from_enterprise_vectorstore(old_title)
+            add_to_enterprise_vectorstore(old_title, knowledge.content)
+
+            print(f"✅ [JSON 更新] 已更新 ID={knowledge.id} 並同步向量庫")
+            return Response(KnowledgeSerializer(knowledge).data, status=status.HTTP_200_OK)
+
+        # ✅ multipart/form-data 檔案更新
         if "file" not in request.FILES:
             return Response({"error": "請上傳新文件"}, status=status.HTTP_400_BAD_REQUEST)
 
         old_file_path = os.path.join(settings.MEDIA_ROOT, knowledge.file.name) if knowledge.file else None
-        old_title = os.path.basename(knowledge.file.name) if knowledge.file else None  
 
         new_file = request.FILES["file"]
-
-        # **先存入臨時檔案 (避免檔案遺失)**
         temp_file_path = os.path.join(settings.MEDIA_ROOT, "temp_" + new_file.name)
         with default_storage.open(temp_file_path, 'wb+') as destination:
             for chunk in new_file.chunks():
                 destination.write(chunk)
 
-        # **更新資料庫內容**
+        # ✅ 更新 Django 資料庫的 file 欄位
         response = self.update(request, *args, **kwargs)
-
-        # **確保 Django 已更新 file 字段**
         knowledge.refresh_from_db()
 
+        # ✅ 刪除舊檔案
         if old_file_path and os.path.exists(old_file_path):
             os.remove(old_file_path)
             print(f"🗑 已刪除舊文件: {old_file_path}")
 
-        new_file_path = knowledge.file.path  # Django 自動儲存的新路徑
+        # ✅ 重新解析文件內容
+        new_file_path = knowledge.file.path
         if new_file.name.endswith(".pdf"):
             extracted_pages = extract_text_from_pdf_with_pages(new_file_path)
         else:
             extracted_pages = [(1, extract_text_from_file(new_file_path))]
 
-        knowledge.content = "\n\n".join([text for _, text in extracted_pages])
+        new_content = "\n\n".join([text for _, text in extracted_pages])
+        knowledge.content = new_content
         knowledge.save()
 
-        # **從向量資料庫刪除舊文件向量**
+        # ✅ 刪除舊向量資料
         delete_from_enterprise_vectorstore(old_title)
 
-        # **存入新的向量資料庫**
+        # ✅ 重建向量資料（逐頁）
         for page_number, page_content in extracted_pages:
             add_to_enterprise_vectorstore(knowledge.file.name, page_content, page_number)
 
+        print(f"✅ [檔案更新] 已更新 ID={knowledge.id} 並同步向量庫")
         return response
+
     
     def delete(self, request, *args, **kwargs):
         """刪除特定知識庫文件，並同步刪除本地檔案 & 向量資料"""

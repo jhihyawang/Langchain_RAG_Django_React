@@ -4,66 +4,70 @@ import { useParams, useNavigate } from "react-router-dom";
 const KnowledgeEditPage = () => {
     const { id } = useParams();
     const navigate = useNavigate();
-    const [content, setContent] = useState("");
-    const [department, setDepartment] = useState("");
+    const [title, setTitle] = useState("");
+    const [chunkList, setChunkList] = useState([]);
 
     useEffect(() => {
-        fetch(`http://127.0.0.1:8000/api/knowledge/${id}/`)
+        fetch(`http://127.0.0.1:8000/api/knowledge/${id}/chunks/`)
             .then(res => res.json())
             .then(data => {
-                setContent(data.content || "");
-                setDepartment(data.department || "");
+                setTitle(data.title || "");
+                setChunkList(data.chunks || []);
             })
-            .catch(err => console.error("❌ 載入內容失敗", err));
+            .catch(err => console.error("❌ 載入 chunks 失敗", err));
     }, [id]);
 
-    const handleSave = async () => {
-        try {
-            const res = await fetch(`http://127.0.0.1:8000/api/knowledge/${id}/`, {
-                method: "PUT",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    content,
-                    department,
-                }),
-            });
+    const handleChunkEdit = (chunkId, newContent) => {
+        setChunkList(prev =>
+            prev.map(chunk =>
+                chunk.id === chunkId ? { ...chunk, content: newContent } : chunk
+            )
+        );
+    };
 
-            if (res.ok) {
-                alert("✅ 內容更新成功！");
-                navigate("/knowledge");
-            } else {
-                alert("❌ 更新失敗");
+    const handleSaveAll = async () => {
+        try {
+            for (const chunk of chunkList) {
+                await fetch(`http://127.0.0.1:8000/api/knowledge/chunk/${chunk.id}/`, {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ content: chunk.content }),
+                });
             }
+            alert("✅ 所有區塊已成功更新！");
+            navigate("/knowledge");
         } catch (err) {
-            console.error("❌ 儲存錯誤", err);
+            console.error("❌ 儲存失敗", err);
+            alert("❌ 儲存失敗");
         }
     };
 
     return (
         <div className="container mt-4">
             <h3>📝 編輯文件內容（ID: {id}）</h3>
-            <div className="mb-3">
-                <label htmlFor="department" className="form-label">部門</label>
-                <input
-                    id="department"
-                    className="form-control"
-                    value={department}
-                    onChange={(e) => setDepartment(e.target.value)}
-                />
-            </div>
-            <div className="mb-3">
-                <label htmlFor="content" className="form-label">文件內容</label>
-                <textarea
-                    id="content"
-                    className="form-control"
-                    rows="12"
-                    value={content}
-                    onChange={(e) => setContent(e.target.value)}
-                ></textarea>
-            </div>
-            <button className="btn btn-success w-100" onClick={handleSave}>💾 儲存</button>
+            <p>檔案名稱：{title}</p>
+
+            {chunkList.map((chunk) => (
+                <div className="card mb-3" key={chunk.id}>
+                    <div className="card-header">
+                        🧩 Chunk #{chunk.chunk_index}（第 {chunk.page_number} 頁）
+                    </div>
+                    <div className="card-body">
+                        <textarea
+                            className="form-control"
+                            rows="5"
+                            value={chunk.content}
+                            onChange={(e) => handleChunkEdit(chunk.id, e.target.value)}
+                        ></textarea>
+                    </div>
+                </div>
+            ))}
+
+            <button className="btn btn-success w-100 mt-4" onClick={handleSaveAll}>
+                💾 儲存所有變更
+            </button>
         </div>
     );
 };
