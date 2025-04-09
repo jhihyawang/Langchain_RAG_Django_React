@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 
 const KnowledgeManager = () => {
     const [knowledgeList, setKnowledgeList] = useState([]);
     const [file, setFile] = useState(null);
     const [department, setDepartment] = useState("");
-    const [selectedId, setSelectedId] = useState(null);
-    const [selectedFileName, setSelectedFileName] = useState(""); // 顯示選中的檔案名稱
+    const [selectedFileName, setSelectedFileName] = useState("");
     const departments = ["IT 部門", "人資部門", "財務部門", "行銷部門"];
+    const navigate = useNavigate(); 
 
     useEffect(() => {
         fetchKnowledge();
@@ -59,38 +60,6 @@ const KnowledgeManager = () => {
         }
     };
 
-    // 更新已上傳的檔案
-    const handleUpdate = async () => {
-        if (!file || !selectedId) {
-            alert("請選擇要更新的文件！");
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("department", department);
-
-        try {
-            const res = await fetch(`http://127.0.0.1:8000/api/knowledge/${selectedId}/`, {
-                method: "PUT",
-                body: formData,
-            });
-
-            if (res.ok) {
-                alert("檔案更新成功！");
-                setFile(null);
-                setDepartment("");
-                setSelectedId(null);
-                setSelectedFileName("");
-                fetchKnowledge();
-            } else {
-                alert("更新失敗！");
-            }
-        } catch (error) {
-            console.error("❌ 更新失敗", error);
-        }
-    };
-
     // 刪除知識
     const handleDelete = async (id) => {
         if (!window.confirm("確定要刪除嗎？")) return;
@@ -133,18 +102,20 @@ const KnowledgeManager = () => {
                 <button className="btn btn-primary w-100" onClick={handleUpload}>
                     上傳文件
                 </button>
-                <button className="btn btn-secondary w-100 mt-2" onClick={handleUpdate} disabled={!selectedId}>
-                    更新檔案
-                </button>
             </div>
 
-            {/* 🔹 知識清單 */}
+            {/* 知識清單 */}
             <table className="table table-bordered mt-4">
                 <thead>
                     <tr>
                         <th>ID</th>
                         <th>檔案名稱</th>
                         <th>部門</th>
+                        <th>內容預覽</th>
+                        <th>段落數</th>
+                        <th>建立時間</th>
+                        <th>上次修改</th>
+                        <th>作者</th>
                         <th>操作</th>
                     </tr>
                 </thead>
@@ -162,31 +133,35 @@ const KnowledgeManager = () => {
                                         <span className="text-muted">無檔案</span>
                                     )}
                                 </td>
-                                <td>{item.department}</td>
+                                <td>{item.department || "—"}</td>
+                                <td className="text-truncate" style={{ maxWidth: "200px" }}>
+                                    {item.content ? item.content.slice(0, 80) + (item.content.length > 80 ? "..." : "") : "無內容"}
+                                </td>
+                                <td>{item.chunk ?? "?"}</td>
+                                <td>{new Date(item.created_at).toLocaleString()}</td>
+                                <td>{new Date(item.updated_at).toLocaleString()}</td>
+                                <td>{item.author || "—"}</td>
                                 <td>
                                     <button
                                         className="btn btn-warning btn-sm me-2"
-                                        onClick={() => {
-                                            setSelectedId(item.id);
-                                            setDepartment(item.department);
-                                            setSelectedFileName(item.file ? decodeURIComponent(item.file.split("/").pop()) : "無檔案");
-                                        }}
+                                        onClick={() => navigate(`/knowledge/edit/${item.id}`)}
                                     >
-                                        選擇更新
+                                        編輯chunks
                                     </button>
                                     <button className="btn btn-danger btn-sm" onClick={() => handleDelete(item.id)}>
-                                        刪除
+                                        刪除檔案
                                     </button>
                                 </td>
                             </tr>
                         ))
                     ) : (
                         <tr>
-                            <td colSpan="4" className="text-center text-muted">⚠️ 查無資料</td>
+                            <td colSpan="8" className="text-center text-muted">⚠️ 查無資料</td>
                         </tr>
                     )}
                 </tbody>
             </table>
+
         </div>
     );
 };

@@ -5,11 +5,11 @@ import urllib.parse
 from pathlib import Path
 
 class KnowledgeSerializer(serializers.ModelSerializer):
-    filename = serializers.SerializerMethodField()  # ✅ 解析檔案名稱
+    filename = serializers.SerializerMethodField()  # 解析檔案名稱
 
     class Meta:
         model = Knowledge
-        fields = ["id", "filename", "file", "department", "content", "created_at", "updated_at", "author"]
+        fields = ["id", "filename", "file", "department", "content", "chunk", "created_at", "updated_at", "author"]
 
     def get_filename(self, obj):
         """解析 `file` URL，取得純檔名"""

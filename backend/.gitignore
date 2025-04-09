@@ -1,0 +1,15 @@
+# Django
+db.sqlite3
+*.log
+*.env
+media/
+chroma_user_db/
+chroma_enterprise_db
+images/
+media/
+
+# 編譯快取
+*.pyc
+*.pyo
+*.pyd
+*.swp

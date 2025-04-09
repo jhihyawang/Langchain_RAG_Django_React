@@ -4,6 +4,7 @@ import KnowledgeManager from "./components/KnowledgeManager";
 import EnterpriseQuery from "./components/EnterpriseQuery";
 import UserQuery from "./components/UserQuery";
 import PdfViewer from "./components/PdfViewer";
+import KnowledgeEditPage from "./components/KnowledgeEditPage";
 
 function App() {
     return (
@@ -27,6 +28,7 @@ function App() {
                 {/* 🔹 設定不同的路由 */}
                 <Routes>
                     <Route path="/knowledge" element={<KnowledgeManager />} />
+                    <Route path="/knowledge/edit/:id" element={<KnowledgeEditPage />} />
                     <Route path="/enterprise_query" element={<EnterpriseQuery />} />
                     <Route path="/general_query" element={<UserQuery />} />
                     <Route path="/pdf-viewer/:title" element={<PdfViewer />} />  {/* ✅ 新增 PDF Viewer 路由 */}
