@@ -55,6 +55,16 @@ def add_to_general_vectorstore(title, content, page_number=1, document_id=None):
     user_vectorstore.add_texts(chunks, metadatas=metadata)
     return True
 
+from pdf2image import convert_from_path
+
+def should_use_ocr(text):
+    # 判斷文字異常的條件（可根據你資料調整）
+    if not text:
+        return True
+    if text.count("(cid:") > 2:
+        return True
+    return False
+
 # 表格偵測
 
 def detect_and_crop_tables_from_image(image, page_index, output_dir="./table_images"):
@@ -95,23 +105,35 @@ def extract_images_from_pdf(pdf_path, output_dir="./pdf_images"):
     return saved
 
 # 主流程：解析 PDF 中的所有元素
-
 def extract_element_from_pdf(file_path, knowledge_id=None):
     text_summaries, table_summaries, image_summaries = [], [], []
 
-    # 文字處理
+    # 轉為圖片以備用（文字錯誤時可 fallback）
+    images = convert_from_path(file_path)
+
+    # 遍歷每頁
     with pdfplumber.open(file_path) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
             text = page.extract_text()
-            if text:
-                summary = summarize_text_or_table(text, "text")
-                full_text = f"[摘要]{summary}[原文]{text}"
-                add_to_general_vectorstore("Text Element", full_text, page_number=i, document_id=knowledge_id)
-                text_summaries.append(summary)
 
+            if should_use_ocr(text):
+                print(f"⚠️ Page {i} 文字異常，改為整頁圖像處理")
+                image_path = f"./ocr_fallback/page_{i}.png"
+                os.makedirs("./ocr_fallback", exist_ok=True)
+                images[i-1].save(image_path)
+
+                summary = summarize_image(image_path)
+                add_to_general_vectorstore("OCR Page Image", summary, page_number=i, document_id=knowledge_id)
+                image_summaries.append(summary)
+                continue
+
+            # 正常頁面則使用文字摘要
+            summary = summarize_text_or_table(text, "text")
+            full_text = f"[摘要]{summary}\n[原文]{text}"
+            add_to_general_vectorstore("Text Element", full_text, page_number=i, document_id=knowledge_id)
+            text_summaries.append(summary)
+            
     # 表格處理（PDF 轉圖像後檢測）
-    from pdf2image import convert_from_path
-    images = convert_from_path(file_path)
     for page_index, img in enumerate(images):
         tables = detect_and_crop_tables_from_image(img, page_index)
         for table_path, pg in tables:
