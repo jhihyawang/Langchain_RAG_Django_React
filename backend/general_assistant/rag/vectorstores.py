@@ -1,132 +1,138 @@
-from rest_framework import generics, status
-from rest_framework.views import APIView
+import os
+import torch
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForObjectDetection
+from rest_framework import status
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from ..models import Document
-import os
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-import pdfplumber
-import pytesseract
-import docx
-import PyPDF2
-from pdf2image import convert_from_path
-from unstructured.partition.pdf import partition_pdf
 import ollama
+import fitz  # PyMuPDF
+import pdfplumber
 
-# 設定詞嵌入模型
+# 向量庫初始化
 embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-
-# 設知識庫的儲存路徑
 CHROMA_user_DB_PATH = "chroma_user_db"
-
-# 初始化向量資料庫
 user_vectorstore = Chroma(persist_directory=CHROMA_user_DB_PATH, embedding_function=embedder)
-
-# 文字分割器
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
 
-# 使用 Gemma3 模型摘要文字或表格
+device = "cuda" if torch.cuda.is_available() else "cpu"
+processor = AutoProcessor.from_pretrained("microsoft/table-transformer-detection", revision="no_timm")
+model = AutoModelForObjectDetection.from_pretrained("microsoft/table-transformer-detection", revision="no_timm").to(device)
+
+# 摘要
+
 def summarize_text_or_table(element, element_type):
-    print(element, ":", element_type)
-    prompt = f"你是一位文本處理的助手，請根據以下內容進行摘要 {element_type}:\n{element}"
+    prompt = f"你是一位文本處理的助手，請根據以下內容進行摘要 {element_type}：\n{element}"
     response = ollama.chat(
         model='gemma3:4b',
-        messages=[{
-            'role': 'user',
-            'content': prompt,
-        }]
+        messages=[{'role': 'user', 'content': prompt}]
     )
-    print(response.message.content)
     return response.message.content
 
-# 使用 Gemma3 模型摘要圖片
 def summarize_image(image_path):
     prompt = "你是一位針對影像和圖片進行摘要的助手，請詳細描述這張圖片的內容，若是圖表請說明其趨勢與關鍵數據"
     try:
         response = ollama.chat(
             model='gemma3:4b',
-            messages=[{
-                'role': 'user',
-                'content': prompt,
-                'images': [image_path]
-            }]
+            messages=[{'role': 'user', 'content': prompt, 'images': [image_path]}]
         )
         return response['message']['content']
     except Exception as e:
-        return f"\u274c Gemma3 \u5716\u50cf\u5206\u6790\u932f\u8aa4: {str(e)}"
-    
-# 將資料加入向量庫
+        return f"❌ 圖像分析錯誤: {str(e)}"
+
+# 儲存向量庫
+
 def add_to_general_vectorstore(title, content, page_number=1, document_id=None):
     if not content.strip():
-        print(f"⚠️ 跳過存入知識庫（內容為空）：{title}")
         return False
     chunks = text_splitter.split_text(content)
-    if not chunks:
-        print(f"⚠️ 無法拆分文本，跳過存入 ChromaDB（{title}）")
-        return False
-    metadata = [
-        {
-            "title": title,
-            "chunk_index": i,
-            "page_number": page_number,
-            "document_id": document_id
-        } for i in range(len(chunks))
-    ]
+    metadata = [{"title": title, "chunk_index": i, "page_number": page_number, "document_id": document_id} for i in range(len(chunks))]
     user_vectorstore.add_texts(chunks, metadatas=metadata)
-    print(f"✅ 已新增文件: {title}，共 {len(chunks)} 段落 (Page {page_number})")
     return True
 
+# 表格偵測
+
+def detect_and_crop_tables_from_image(image, page_index, output_dir="./table_images"):
+    os.makedirs(output_dir, exist_ok=True)
+    inputs = processor(images=image, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    target_sizes = torch.tensor([image.size[::-1]]).to(device)
+    results = processor.post_process_object_detection(outputs, threshold=0.6, target_sizes=target_sizes)[0]
+
+    saved_paths = []
+    for i, box in enumerate(results["boxes"]):
+        cropped = image.crop(box.tolist())
+        save_path = os.path.join(output_dir, f"page{page_index+1}_table{i}.png")
+        cropped.save(save_path)
+        saved_paths.append((save_path, page_index+1))
+    return saved_paths
+
+# 圖片擷取
+
+def extract_images_from_pdf(pdf_path, output_dir="./pdf_images"):
+    os.makedirs(output_dir, exist_ok=True)
+    doc = fitz.open(pdf_path)
+    saved = []
+    for page_index in range(len(doc)):
+        page = doc.load_page(page_index)
+        images = page.get_images(full=True)
+        for img_index, img in enumerate(images):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+            path = os.path.join(output_dir, f"page{page_index+1}_img{img_index+1}.{image_ext}")
+            with open(path, "wb") as f:
+                f.write(image_bytes)
+            saved.append((path, page_index+1))
+    return saved
+
+# 主流程：解析 PDF 中的所有元素
+
 def extract_element_from_pdf(file_path, knowledge_id=None):
-    output_path = "./images"
-    os.makedirs(output_path, exist_ok=True)
-
-    raw_pdf_elements = partition_pdf(
-        filename=file_path,
-        extract_images_in_pdf=True,
-        infer_table_structure=True,
-        chunking_strategy="by_title",
-        max_characters=4000,
-        new_after_n_chars=3800,
-        combine_text_under_n_chars=2000,
-        extract_image_block_output_dir=output_path,
-    )
-
-    text_elements, table_elements, image_elements = [], [], []
     text_summaries, table_summaries, image_summaries = [], [], []
 
-    for e in raw_pdf_elements:
-        if 'CompositeElement' in repr(e):
-            text_elements.append(e.text)
-            summary = summarize_text_or_table(e.text, 'text')
-            text_summaries.append(summary)
-        elif 'Table' in repr(e):
-            table_elements.append(e.text)
-            summary = summarize_text_or_table(e.text, 'table')
+    # 文字處理
+    with pdfplumber.open(file_path) as pdf:
+        for i, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text()
+            if text:
+                summary = summarize_text_or_table(text, "text")
+                full_text = f"[摘要]{summary}[原文]{text}"
+                add_to_general_vectorstore("Text Element", full_text, page_number=i, document_id=knowledge_id)
+                text_summaries.append(summary)
+
+    # 表格處理（PDF 轉圖像後檢測）
+    from pdf2image import convert_from_path
+    images = convert_from_path(file_path)
+    for page_index, img in enumerate(images):
+        tables = detect_and_crop_tables_from_image(img, page_index)
+        for table_path, pg in tables:
+            summary = summarize_image(table_path)
+            add_to_general_vectorstore("Table Image", summary, page_number=pg, document_id=knowledge_id)
             table_summaries.append(summary)
 
-    for i in os.listdir(output_path):
-        if i.endswith(('.png', '.jpg', '.jpeg')):
-            image_path = os.path.join(output_path, i)
-            image_elements.append(image_path)
-            summary = summarize_image(image_path)
-            image_summaries.append(summary)
-
-    for e, s in zip(text_elements, text_summaries):
-        add_to_general_vectorstore(file_path, "Text Element", s, knowledge_id=knowledge_id)
-
-    for e, s in zip(table_elements, table_summaries):
-        add_to_general_vectorstore(file_path, "Table Element", s, knowledge_id=knowledge_id)
-
-    for e, s in zip(image_elements, image_summaries):
-        add_to_general_vectorstore(file_path, "Image Element", s, knowledge_id=knowledge_id)
+    # 圖片擷取 + 分析
+    images_from_pdf = extract_images_from_pdf(file_path)
+    for img_path, page_number in images_from_pdf:
+        summary = summarize_image(img_path)
+        add_to_general_vectorstore("Embedded Image", summary, page_number=page_number, document_id=knowledge_id)
+        image_summaries.append(summary)
 
     return {
         "text_summaries": text_summaries,
         "table_summaries": table_summaries,
         "image_summaries": image_summaries
     }
+
+
     
 def delete_from_general_vectorstore(document_id):
     try:
