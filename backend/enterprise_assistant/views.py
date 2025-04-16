@@ -7,7 +7,6 @@ import os
 from django.conf import settings
 from django.core.files.storage import default_storage
 from .rag.vectorstores import (
-    extract_text_from_file,
     enterprise_vectorstore,
     extract_text_from_pdf_with_pages,
     add_to_enterprise_vectorstore,

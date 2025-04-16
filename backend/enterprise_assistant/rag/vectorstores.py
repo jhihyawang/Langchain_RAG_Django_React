@@ -25,29 +25,6 @@ enterprise_vectorstore = Chroma(persist_directory=CHROMA_ENTERPRISE_DB_PATH, emb
 # 文字分割器
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
 
-def extract_text_from_file(file_path):
-    text = ""
-    if file_path.endswith(".pdf"):
-        with pdfplumber.open(file_path) as pdf:
-            text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
-        if not text.strip():
-            with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-        if not text.strip():
-            images = convert_from_path(file_path)
-            for img in images:
-                text += pytesseract.image_to_string(img, lang="chi_tra") + "\n"
-    elif file_path.endswith(".docx"):
-        doc = docx.Document(file_path)
-        for para in doc.paragraphs:
-            text += para.text + "\n"
-    print("解析內容前 500 字:", text[:500])
-    return text.strip()
-
 def extract_text_from_pdf_with_pages(file_path):
     extracted_pages = []
     with pdfplumber.open(file_path) as pdf:

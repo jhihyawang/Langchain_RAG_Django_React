@@ -60,6 +60,21 @@ const DocumentEditPage = () => {
         }
     };
 
+    const renderChunkImage = (chunk) => {
+        if (chunk.source && (chunk.source.startsWith("images/") || chunk.source.startsWith("tables_valid/"))) {
+            return (
+                <div className="mb-2 text-center">
+                    <img
+                        src={`http://127.0.0.1:8000/media/${chunk.source}`}
+                        alt={`chunk-${chunk.id}`}
+                        style={{ maxWidth: "100%", maxHeight: "300px", border: "1px solid #ccc" }}
+                    />
+                </div>
+            );
+        }
+        return null;
+    };
+
     return (
         <div className="container mt-4">
             <h3>📝 編輯文件內容（ID: {id}）</h3>
@@ -68,7 +83,7 @@ const DocumentEditPage = () => {
             {chunkList.map((chunk) => (
                 <div className="card mb-3" key={chunk.id}>
                     <div className="card-header d-flex justify-content-between align-items-center">
-                        <span>🧩 Chunk #{chunk.chunk_index}（第 {chunk.page_number} 頁）</span>
+                        <span>🧩 Chunk #{chunk.chunk_index}（第 {chunk.page_number} 頁） 來源：{chunk.source}</span>
                         <button
                             className="btn btn-sm btn-danger"
                             onClick={() => handleDeleteChunk(chunk.id)}
@@ -77,6 +92,7 @@ const DocumentEditPage = () => {
                         </button>
                     </div>
                     <div className="card-body">
+                        {renderChunkImage(chunk)}
                         <textarea
                             className="form-control"
                             rows="5"

@@ -13,23 +13,17 @@ from rest_framework.views import APIView
 from langchain_core.prompts import PromptTemplate
 import uuid
 import ollama
-import fitz  # PyMuPDF
-import pdfplumber
-import io
-import base64
 import requests
-from PIL import Image
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 import os
 from django.conf import settings
 from django.core.files.storage import default_storage
+from .rag.extract_pdf import processData
 from .rag.vectorstores import (
-    user_vectorstore,
     add_to_general_vectorstore,
     delete_from_general_vectorstore,
     list_from_general_vectorstore,
-    extract_element_from_pdf
 )
 
 class AskImageView(APIView):
@@ -115,21 +109,42 @@ class DocumentListCreateView(generics.ListCreateAPIView):
         author = request.data.get("author", None)
 
         document = Document.objects.create(file=file, author_id=author)
-
-        # ✅ 這裡修正錯誤用法
         file_path = document.file.path
+        document_id = document.id
+        title = os.path.basename(file.name)
 
-        # 解析 PDF 多模態內容並摘要 + 存入向量庫
-        summary = extract_element_from_pdf(file_path, knowledge_id=document.id)
+        # 1. 拆解 PDF 並進行多模態解析
+        extract_data = processData(file_path, document_id=document_id)
+        """
+        extract_data 結構如下：
+        {
+            "text": [{ "page": 1, "content": "...", "source": "origin" }, ...],
+            "table": [{ "page": 3, "content": "...", "source": "/path/to/table.png" }, ...],
+            "image": [{ "page": 4, "content": "...", "source": "/path/to/image.png" }, ...]
+        }
+        """
 
-        # 從向量庫取得摘要內容
-        chunks = list_from_general_vectorstore(document.id)
+        # 2. 儲存至向量庫
+        for media_type in ["text", "table", "image"]:
+            for item in extract_data.get(media_type, []):
+                success = add_to_general_vectorstore(
+                    content=item["content"],
+                    page_number=item["page"],
+                    document_id=document_id,
+                    media_type=media_type,
+                    source=item["source"]
+                )
+                if success:
+                    print(f"page{item["page"]},content:{item["content"]} add to vectorstores")
+
+        # 3. 更新文件摘要與 chunk 數量
+        chunks = list_from_general_vectorstore(document_id)
         first_chunk = chunks[0]["content"] if chunks else ""
-
         document.content = first_chunk
         document.chunk = len(chunks)
         document.save()
 
+        print(f"✅ 上傳文件完成，產生 {len(chunks)} 個 chunks 並儲存至向量庫")
         return Response(DocumentSerializer(document).data, status=status.HTTP_201_CREATED)
 
 
@@ -145,10 +160,7 @@ class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
 
         if request.content_type.startswith("application/json"):
             content = request.data.get("content")
-            department = request.data.get("department", document.department)
-
             document.content = content or ""
-            document.department = department
             document.save()
 
             delete_from_general_vectorstore(document_id=document_id)
@@ -162,36 +174,53 @@ class DocumentDetailView(generics.RetrieveUpdateDestroyAPIView):
 
         old_file_path = os.path.join(settings.MEDIA_ROOT, document.file.name) if document.file else None
 
+        # 儲存新上傳的檔案
         new_file = request.FILES["file"]
         temp_file_path = os.path.join(settings.MEDIA_ROOT, "temp_" + new_file.name)
         with default_storage.open(temp_file_path, 'wb+') as destination:
             for chunk in new_file.chunks():
                 destination.write(chunk)
 
+        # 呼叫內建更新處理流程（會更新 file 欄位）
         response = self.update(request, *args, **kwargs)
         document.refresh_from_db()
+        new_file_path = document.file.path
 
+        # 刪除舊檔案
         if old_file_path and os.path.exists(old_file_path):
             os.remove(old_file_path)
             print(f"🗑 已刪除舊文件: {old_file_path}")
 
-        new_file_path = document.file.path
-        if new_file.name.endswith(".pdf"):
-            extracted_pages = extract_text_from_pdf_with_pages(new_file_path)
-        else:
-            extracted_pages = [(1, extract_text_from_file(new_file_path))]
+        # ✅ 開始解析新 PDF 檔案並摘要
+        from .rag.extract_pdf import ExtractDataFromPDF
+        from .rag import modelLever
+        from .rag.vectorstores import add_to_general_vectorstore
 
-        new_content = "\n\n".join([text for _, text in extracted_pages])
-        document.content = new_content
-        document.save()
+        extract_data = ExtractDataFromPDF(new_file_path)
+        summary_data = summarizeDatafromPDF(extract_data)
 
+        # ✅ 先刪除舊的向量資料
         delete_from_general_vectorstore(document_id=document_id)
 
-        for page_number, page_content in extracted_pages:
-            add_to_general_vectorstore(document.file.name, page_content, page_number, document_id=document_id)
+        # ✅ 儲存新向量資料
+        total_chunks = 0
+        for category in summary_data:
+            summaries = summary_data[category]["summary"]
+            for page_number, content in enumerate(summaries, start=1):
+                success = add_to_general_vectorstore(document.file.name, content, page_number, document_id=document_id)
+                if success:
+                    total_chunks += 1
 
-        print(f"✅ [檔案更新] 已更新 ID={document_id} 並同步向量庫")
+        # ✅ 更新資料庫內容
+        chunks = list_from_general_vectorstore(document_id)
+        first_chunk = chunks[0]["content"] if chunks else ""
+        document.content = first_chunk
+        document.chunk = total_chunks
+        document.save()
+
+        print(f"✅ [檔案更新] 已更新 ID={document_id} 並同步向量庫，共 {total_chunks} 筆 chunk")
         return response
+
 
     def delete(self, request, *args, **kwargs):
         document = self.get_object()

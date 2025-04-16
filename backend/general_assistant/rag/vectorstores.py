@@ -1,7 +1,5 @@
 import os
-import torch
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForObjectDetection
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,6 +11,9 @@ from langchain_chroma import Chroma
 import ollama
 import fitz  # PyMuPDF
 import pdfplumber
+import io
+from PIL import Image
+from pdf2image import convert_from_path  # ← 改為處理本地路徑
 
 # 向量庫初始化
 embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
@@ -20,140 +21,24 @@ CHROMA_user_DB_PATH = "chroma_user_db"
 user_vectorstore = Chroma(persist_directory=CHROMA_user_DB_PATH, embedding_function=embedder)
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-processor = AutoProcessor.from_pretrained("microsoft/table-transformer-detection", revision="no_timm")
-model = AutoModelForObjectDetection.from_pretrained("microsoft/table-transformer-detection", revision="no_timm").to(device)
-
-# 摘要
-
-def summarize_text_or_table(element, element_type):
-    prompt = f"你是一位文本處理的助手，請根據以下內容進行摘要 {element_type}：\n{element}"
-    response = ollama.chat(
-        model='gemma3:4b',
-        messages=[{'role': 'user', 'content': prompt}]
-    )
-    return response.message.content
-
-def summarize_image(image_path):
-    prompt = "你是一位針對影像和圖片進行摘要的助手，請詳細描述這張圖片的內容，若是圖表請說明其趨勢與關鍵數據"
-    try:
-        response = ollama.chat(
-            model='gemma3:4b',
-            messages=[{'role': 'user', 'content': prompt, 'images': [image_path]}]
-        )
-        return response['message']['content']
-    except Exception as e:
-        return f"❌ 圖像分析錯誤: {str(e)}"
-
 # 儲存向量庫
-
-def add_to_general_vectorstore(title, content, page_number=1, document_id=None):
+def add_to_general_vectorstore(content, page_number=1, document_id=None, media_type="text", source=None):
     if not content.strip():
         return False
     chunks = text_splitter.split_text(content)
-    metadata = [{"title": title, "chunk_index": i, "page_number": page_number, "document_id": document_id} for i in range(len(chunks))]
+    metadata = []
+    for i in range(len(chunks)):
+        meta = {
+            "chunk_index": i,
+            "page_number": page_number,
+            "document_id": document_id,
+            "mediaType": media_type,
+        }
+        if source:
+            meta["source"] = source
+        metadata.append(meta)
     user_vectorstore.add_texts(chunks, metadatas=metadata)
     return True
-
-from pdf2image import convert_from_path
-
-def should_use_ocr(text):
-    # 判斷文字異常的條件（可根據你資料調整）
-    if not text:
-        return True
-    if text.count("(cid:") > 2:
-        return True
-    return False
-
-# 表格偵測
-
-def detect_and_crop_tables_from_image(image, page_index, output_dir="./table_images"):
-    os.makedirs(output_dir, exist_ok=True)
-    inputs = processor(images=image, return_tensors="pt").to(device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    target_sizes = torch.tensor([image.size[::-1]]).to(device)
-    results = processor.post_process_object_detection(outputs, threshold=0.6, target_sizes=target_sizes)[0]
-
-    saved_paths = []
-    for i, box in enumerate(results["boxes"]):
-        cropped = image.crop(box.tolist())
-        save_path = os.path.join(output_dir, f"page{page_index+1}_table{i}.png")
-        cropped.save(save_path)
-        saved_paths.append((save_path, page_index+1))
-    return saved_paths
-
-# 圖片擷取
-
-def extract_images_from_pdf(pdf_path, output_dir="./pdf_images"):
-    os.makedirs(output_dir, exist_ok=True)
-    doc = fitz.open(pdf_path)
-    saved = []
-    for page_index in range(len(doc)):
-        page = doc.load_page(page_index)
-        images = page.get_images(full=True)
-        for img_index, img in enumerate(images):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            image_ext = base_image["ext"]
-            path = os.path.join(output_dir, f"page{page_index+1}_img{img_index+1}.{image_ext}")
-            with open(path, "wb") as f:
-                f.write(image_bytes)
-            saved.append((path, page_index+1))
-    return saved
-
-# 主流程：解析 PDF 中的所有元素
-def extract_element_from_pdf(file_path, knowledge_id=None):
-    text_summaries, table_summaries, image_summaries = [], [], []
-
-    # 轉為圖片以備用（文字錯誤時可 fallback）
-    images = convert_from_path(file_path)
-
-    # 遍歷每頁
-    with pdfplumber.open(file_path) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text()
-
-            if should_use_ocr(text):
-                print(f"⚠️ Page {i} 文字異常，改為整頁圖像處理")
-                image_path = f"./ocr_fallback/page_{i}.png"
-                os.makedirs("./ocr_fallback", exist_ok=True)
-                images[i-1].save(image_path)
-
-                summary = summarize_image(image_path)
-                add_to_general_vectorstore("OCR Page Image", summary, page_number=i, document_id=knowledge_id)
-                image_summaries.append(summary)
-                continue
-
-            # 正常頁面則使用文字摘要
-            summary = summarize_text_or_table(text, "text")
-            full_text = f"[摘要]{summary}\n[原文]{text}"
-            add_to_general_vectorstore("Text Element", full_text, page_number=i, document_id=knowledge_id)
-            text_summaries.append(summary)
-            
-    # 表格處理（PDF 轉圖像後檢測）
-    for page_index, img in enumerate(images):
-        tables = detect_and_crop_tables_from_image(img, page_index)
-        for table_path, pg in tables:
-            summary = summarize_image(table_path)
-            add_to_general_vectorstore("Table Image", summary, page_number=pg, document_id=knowledge_id)
-            table_summaries.append(summary)
-
-    # 圖片擷取 + 分析
-    images_from_pdf = extract_images_from_pdf(file_path)
-    for img_path, page_number in images_from_pdf:
-        summary = summarize_image(img_path)
-        add_to_general_vectorstore("Embedded Image", summary, page_number=page_number, document_id=knowledge_id)
-        image_summaries.append(summary)
-
-    return {
-        "text_summaries": text_summaries,
-        "table_summaries": table_summaries,
-        "image_summaries": image_summaries
-    }
-
 
     
 def delete_from_general_vectorstore(document_id):
@@ -195,12 +80,32 @@ def list_from_general_vectorstore(document_id):
 class ChunkListCreateView(APIView):
     def get(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
-        chunks = list_from_general_vectorstore(document.id)
+        results = user_vectorstore._collection.get(
+            where={"document_id": document.id},
+            include=["documents", "metadatas"]
+        )
+        documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+        ids = results.get("ids", [])
+
+        chunks = []
+        for i in range(len(documents)):
+            metadata = metadatas[i] if i < len(metadatas) else {}
+            chunks.append({
+                "id": ids[i],
+                "chunk_index": metadata.get("chunk_index", i),
+                "page_number": metadata.get("page_number", None),
+                "content": documents[i],
+                "mediaType": metadata.get("mediaType", "text"),
+                "source": metadata.get("source", None)
+            })
+            
         return Response({
             "document_id": document.id,
             "title": os.path.basename(document.file.name) if document.file else "",
             "chunks": chunks
         }, status=status.HTTP_200_OK)
+
 
 class ChunkDetailView(APIView):
     """
