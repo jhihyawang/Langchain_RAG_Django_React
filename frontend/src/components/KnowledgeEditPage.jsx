@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import API_BASE_URL from "../api";
 
 const KnowledgeEditPage = () => {
     const { id } = useParams();
@@ -10,7 +11,7 @@ const KnowledgeEditPage = () => {
     const [searchText, setSearchText] = useState("");
 
     useEffect(() => {
-        fetch(`http://127.0.0.1:8000/api/knowledge/${id}/chunks/`)
+        fetch(`${API_BASE_URL}/api/knowledge/${id}/chunks/`)
             .then(res => res.json())
             .then(data => {
                 setTitle(data.title || "");
@@ -52,7 +53,7 @@ const KnowledgeEditPage = () => {
     const handleDeleteChunk = async (chunkId) => {
         if (!window.confirm("確定要刪除此區塊嗎？")) return;
         try {
-            const res = await fetch(`http://127.0.0.1:8000/api/knowledge/chunk/${chunkId}/`, {
+            const res = await fetch(`${API_BASE_URL}/api/knowledge/chunk/${chunkId}/`, {
                 method: "DELETE",
             });
             if (res.status === 204) {
@@ -74,7 +75,7 @@ const KnowledgeEditPage = () => {
         try {
             for (const group of chunkGroups) {
                 for (const chunk of group.chunks) {
-                    await fetch(`http://127.0.0.1:8000/api/knowledge/chunk/${chunk.id}/`, {
+                    await fetch(`${API_BASE_URL}/api/knowledge/chunk/${chunk.id}/`, {
                         method: "PUT",
                         headers: {
                             "Content-Type": "application/json",
@@ -111,7 +112,7 @@ const KnowledgeEditPage = () => {
                 {imageSources.map((src, idx) => (
                     <img
                         key={idx}
-                        src={`http://127.0.0.1:8000/${src}`}
+                        src={`${API_BASE_URL}/${src}`}
                         alt={`chunk-image-${idx}`}
                         style={{
                             maxWidth: "100%",
@@ -138,22 +139,39 @@ const KnowledgeEditPage = () => {
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
             />
-
             {chunkGroups.map((group, idx) => {
                 const matchedChunks = group.chunks.filter(chunk =>
                     chunk.content.toLowerCase().includes(searchText.toLowerCase())
                 );
                 if (matchedChunks.length === 0) return null;
 
+                const mediaTypes = [...new Set(group.chunks.map(c => c.media_type))];
+                const isPureTable = mediaTypes.length === 1 && mediaTypes[0] === "table";
+                const isImage = mediaTypes.length === 1 && mediaTypes[0] === "image";
+                const isText = mediaTypes.length === 1 && mediaTypes[0] === "text";
+
                 return (
                     <div key={idx} className="mb-4 border rounded p-3 bg-light">
                         <h5>
                             📄 頁碼：{Array.isArray(group.page_number)
                                 ? group.page_number.join(", ")
-                                : group.page_number} ｜ 共 {Array.isArray(group.page_number) ? group.page_number.length : 1} 張跨頁表格
+                                : group.page_number}
+                            {isPureTable && (
+                                <> ｜ 共 {Array.isArray(group.page_number) ? group.page_number.length : 1} 張跨頁表格</>
+                            )}
                         </h5>
 
-                        {renderGroupImages(group.source)}
+                        {/* ✅ 僅表格與圖片顯示圖片 */}
+                        {(isPureTable || isImage) && renderGroupImages(group.source)}
+
+                        {/* ✅ 僅文字與圖片顯示來源 */}
+                        {(isText || isImage) && group.source && (
+                            <p className="text-muted small">
+                                來源：{Array.isArray(group.source)
+                                    ? group.source.join("、")
+                                    : group.source}
+                            </p>
+                        )}
 
                         {matchedChunks.map((chunk) => (
                             <div className="card my-2" key={chunk.id}>
@@ -191,7 +209,6 @@ const KnowledgeEditPage = () => {
                     </div>
                 );
             })}
-
             <button className="btn btn-success w-100 mt-4" onClick={handleSaveAll}>
                 💾 儲存所有變更
             </button>
