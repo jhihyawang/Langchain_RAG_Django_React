@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 
 const DocumentEditPage = () => {
     const { id } = useParams();
     const navigate = useNavigate();
     const [title, setTitle] = useState("");
     const [chunkList, setChunkList] = useState([]);
+    const cleanTitle = title.replace(/\.pdf$/i, "");
 
     useEffect(() => {
         fetch(`http://127.0.0.1:8000/api/document/${id}/chunks/`)
@@ -61,19 +62,41 @@ const DocumentEditPage = () => {
     };
 
     const renderChunkImage = (chunk) => {
-        if (chunk.source && (chunk.source.startsWith("images/") || chunk.source.startsWith("tables_valid/"))) {
-            return (
-                <div className="mb-2 text-center">
-                    <img
-                        src={`http://127.0.0.1:8000/media/${chunk.source}`}
-                        alt={`chunk-${chunk.id}`}
-                        style={{ maxWidth: "100%", maxHeight: "300px", border: "1px solid #ccc" }}
-                    />
-                </div>
-            );
+        let sources = [];
+
+        try {
+            const parsed = JSON.parse(chunk.source);
+            sources = Array.isArray(parsed) ? parsed : [parsed];
+        } catch {
+            sources = [chunk.source];
         }
-        return null;
+
+        // ➤ 過濾非圖片類型（只保留以 images/ 或 tables/ 開頭的路徑）
+        const imageSources = sources.filter(
+            src => typeof src === 'string' && (src.startsWith("images/") || src.startsWith("tables/"))
+        );
+
+        if (imageSources.length === 0) return null;
+
+        return (
+            <div className="mb-2 text-center">
+                {imageSources.map((src, idx) => (
+                    <img
+                        key={idx}
+                        src={`http://127.0.0.1:8000/media/extract_data/${encodeURIComponent(cleanTitle)}/${src}`}
+                        alt={`chunk-${chunk.id}-${idx}`}
+                        style={{
+                            maxWidth: "100%",
+                            maxHeight: "300px",
+                            border: "1px solid #ccc",
+                            margin: "4px",
+                        }}
+                    />
+                ))}
+            </div>
+        );
     };
+
 
     return (
         <div className="container mt-4">

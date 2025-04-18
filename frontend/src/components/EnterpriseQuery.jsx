@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import Switch from "react-switch";
 
 const EnterpriseQuery = () => {
@@ -7,6 +7,7 @@ const EnterpriseQuery = () => {
     const [documents, setDocuments] = useState([]);  // 存儲檢索到的文件
     const [loading, setLoading] = useState(false);  // 控制讀取狀態
     const [modelType, setModelType] = useState("cloud");  // 新增模型選擇，預設為雲端 LLM
+    const [modelName, setModelName] = useState("");  // 新增模型選擇，預設為雲端 LLM
     const [isListening, setIsListening] = useState(false); // 控制語音輸入狀態
     const [Retrieval, setIsRetrival] = useState(true);  // 預設啟用檢索
 
@@ -109,7 +110,7 @@ const EnterpriseQuery = () => {
                     <option value="local">💻 本地 LLM</option>
                 </select>
             </div>
-            
+
             <div className="mb-3 d-flex align-items-center">
                 <label className="me-3">🔁 啟用向量檢索</label>
                 <Switch
@@ -178,10 +179,10 @@ const EnterpriseQuery = () => {
                             <li key={index} className="list-group-item">
                                 <strong>📌 {doc.title} (第 {doc.page_number} 頁)</strong>
                                 <p className="text-muted">{doc.content?.substring(0, 150)}...</p>
-                                <a 
-                                    href={`/pdf-viewer/${doc.title}#page=${doc.page_number}`} 
-                                    className="btn btn-sm btn-link" 
-                                    target="_blank" 
+                                <a
+                                    href={`/pdf-viewer/${doc.title}#page=${doc.page_number}`}
+                                    className="btn btn-sm btn-link"
+                                    target="_blank"
                                     rel="noopener noreferrer"
                                 >
                                     🔗 跳轉到該頁

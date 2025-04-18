@@ -1,9 +1,11 @@
-from django.db import models
 from django.contrib.auth.models import User
+from django.db import models
+
 
 class Knowledge(models.Model):
     id = models.AutoField(primary_key=True)
     file = models.FileField(upload_to="knowledge_files/", blank=True, null=True)  # 允許上傳文件
+    title = models.CharField(max_length=255, null=False, blank=False, default="未分類")
     department = models.CharField(max_length=255, null=False, blank=False, default="未分類")
     content = models.TextField(blank=True, null=True)  # 存放第一個chunk供使用者預覽
     chunk = models.IntegerField(blank=True, null=True)  # 切割後的chunk數量
