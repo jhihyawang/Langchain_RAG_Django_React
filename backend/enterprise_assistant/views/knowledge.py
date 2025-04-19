@@ -2,8 +2,8 @@
 import json
 import os
 
-from common.module.processor.pdf_processor import PdfProcessor
-from common.module.processor.vector_store import VectorStoreHandler
+from common.modules.processor.pdf_processor import PdfProcessor
+from common.modules.processor.vector_store import VectorStoreHandler
 from django.conf import settings
 from django.core.files.storage import default_storage
 from rest_framework import filters, generics, pagination, status
@@ -75,7 +75,7 @@ class KnowledgeListCreateView(generics.ListCreateAPIView):
 
         file_path = knowledge.file.path
         processor = PdfProcessor(pdf_path=file_path, knowledge_id=str(knowledge.id))
-        result = processor.process()
+        result = processor.optimized_process()
 
         # 儲存至向量庫
         for media_type in ["text", "table", "image"]:
@@ -153,14 +153,34 @@ class KnowledgeDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def delete(self, request, *args, **kwargs):
         knowledge = self.get_object()
-        file_path = os.path.join(settings.MEDIA_ROOT, knowledge.file.name) if knowledge.file else None
+        file_name = knowledge.file.name if knowledge.file else None
         knowledge_id = knowledge.id
+        
+        # 設定上傳文件的完整路徑
+        file_path = os.path.join(settings.MEDIA_ROOT, "knowledge_files",file_name) if file_name else None
+        
+        # 設定 extract_data 目錄下的相關文件夾路徑
+        extract_dir = os.path.join(settings.MEDIA_ROOT, "extract_data", file_name) if file_name else None
+        try:
+            # 刪除 Django 物件
+            knowledge.delete()
+            
+            # 刪除向量資料庫相關內容
+            vectorstore.delete(knowledge_id)
 
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-
-        vectorstore = VectorStoreHandler("chroma_user_db")
-        vectorstore.delete(knowledge_id)
-        knowledge.delete()
-
-        return standard_response(message="已刪除知識文件")
+            
+            # 刪除 extract_data 目錄下與該文件名相關的所有檔案
+            if extract_dir and os.path.isdir(extract_dir):
+                for file in os.listdir(extract_dir):
+                    file_path = os.path.join(extract_dir, file)
+                    if os.path.isfile(file_path):  # 檢查是否是檔案
+                        os.remove(file_path)  # 刪除檔案
+                os.rmdir(extract_dir)  # 刪除空目錄（如果目錄是空的）
+                
+            # 刪除上傳的單個文件（如果存在）
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)  # 刪除文件
+                
+            return standard_response(message="已刪除知識文件")
+        except Exception as e:
+            return standard_response(message=f"刪除過程中出現錯誤: {str(e)}", status="error")

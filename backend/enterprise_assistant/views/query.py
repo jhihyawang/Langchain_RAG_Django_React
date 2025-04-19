@@ -1,7 +1,7 @@
 # views/query.py
 
-from common.module.ai.llm_factory import LlmFactory
-from common.module.processor.vector_store import VectorStoreHandler
+from common.modules.ai.llm_factory import LlmFactory
+from common.modules.processor.vector_store import VectorStoreHandler
 from drf_spectacular.utils import extend_schema
 from enterprise_assistant.serializers import (
     EnterpriseQueryResponseSerializer, EnterpriseQuerySerializer)

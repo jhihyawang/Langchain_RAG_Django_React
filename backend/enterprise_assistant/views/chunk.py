@@ -1,4 +1,4 @@
-from common.module.processor.vector_store import VectorStoreHandler
+from common.modules.processor.vector_store import VectorStoreHandler
 from django.shortcuts import get_object_or_404
 from django.utils.timezone import now
 from enterprise_assistant.models import Knowledge

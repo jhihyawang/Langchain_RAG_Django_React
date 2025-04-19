@@ -24,7 +24,7 @@ const KnowledgeManager = () => {
     }, []);
 
     // 查詢知識庫
-    const fetchKnowledge = async (url = `${API_BASE_URL}/knowledge/`) => {
+    const fetchKnowledge = async (url = `${API_BASE_URL}/api/knowledge/`) => {
         try {
             const res = await fetch(url);
             const data = await res.json();
@@ -59,7 +59,7 @@ const KnowledgeManager = () => {
         formData.append("content", content);
 
         try {
-            const res = await fetch(`${API_BASE_URL}/knowledge/`, {
+            const res = await fetch(`${API_BASE_URL}/api/knowledge/`, {
                 method: "POST",
                 body: formData,
             });
@@ -90,7 +90,7 @@ const KnowledgeManager = () => {
         formData.append("department", department);
 
         try {
-            const res = await fetch(`${API_BASE_URL}/knowledge/${selectedId}/`, {
+            const res = await fetch(`${API_BASE_URL}/api/knowledge/${selectedId}/`, {
                 method: "PUT",
                 body: formData,
             });
@@ -115,7 +115,7 @@ const KnowledgeManager = () => {
         if (!window.confirm("確定要刪除嗎？")) return;
 
         try {
-            const res = await fetch(`${API_BASE_URL}/knowledge/${id}/`, {
+            const res = await fetch(`${API_BASE_URL}/api/knowledge/${id}/`, {
                 method: "DELETE",
             });
 
@@ -216,7 +216,7 @@ const KnowledgeManager = () => {
             <div className="mt-4 text-center">
                 <button
                     className="btn btn-outline-secondary me-2"
-                    onClick={() => fetchKnowledge(`${API_BASE_URL}/knowledge/?page=${currentPage - 1}`)}
+                    onClick={() => fetchKnowledge(`${API_BASE_URL}/api/knowledge/?page=${currentPage - 1}`)}
                     disabled={currentPage <= 1}
                 >
                     上一頁
@@ -228,7 +228,7 @@ const KnowledgeManager = () => {
 
                 <button
                     className="btn btn-outline-secondary ms-2"
-                    onClick={() => fetchKnowledge(`${API_BASE_URL}/knowledge/?page=${currentPage + 1}`)}
+                    onClick={() => fetchKnowledge(`${API_BASE_URL}/api/knowledge/?page=${currentPage + 1}`)}
                     disabled={currentPage >= totalPages}
                 >
                     下一頁
