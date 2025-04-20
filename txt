@@ -1,21 +1,23 @@
-def optimized_process(self):
-    split_pdfs = self.split_pdf()
-    all_results = {"text": [], "table": [], "image": []}
-    final_pdf_parts = []
+    def rotate_original_pdf(self, file_path, rotated_pages):
+        log("rotate this file")
+        doc = fitz.open(file_path)
+        for page_index in rotated_pages:
+            page = doc[page_index - 1]
+            page.set_rotation((page.rotation + 90) % 360)
+            log(f"========== Page {page_index} has been rotated 90 degrees ==========")
 
-    for split_index, split_pdf in enumerate(split_pdfs):
-        result = self.process(split_index, split_pdf)
-        self.save_results(result)
-        all_results["text"].extend(result["text"])
-        all_results["table"].extend(result["table"])
-        all_results["image"].extend(result["image"])
-        final_pdf_parts.append(result["rotated_pdf"])  # 用旋轉後的版本
+        temp_path = file_path + ".rotated.pdf"
+        doc.save(temp_path)
+        doc.close()
 
-    self.merge_pdfs(final_pdf_parts)  # 合併所有旋轉後的部分檔案（取代原來 split_pdfs）
+        # 刪除舊文件，然後重命名新文件
+        try:
+            os.remove(file_path)  # 刪除原文件
+            os.rename(temp_path, file_path)  # 重命名臨時檔案
+            log(f"檔案已成功替換：{file_path}")
+        except PermissionError as e:
+            log(f"無法替換檔案：{e}")
+            raise
 
-    # ✅ 刪除原始未旋轉版本
-    for f in split_pdfs:
-        if os.path.exists(f):
-            os.remove(f)
+        return file_path
 
-    return all_results
