@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'drf_spectacular',
     "enterprise_assistant",  # 企業知識庫 APP
     "general_assistant",  # 通用小助手 APP
+    "background_task",
 ]
 
 REST_FRAMEWORK = {

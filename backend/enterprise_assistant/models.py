@@ -9,6 +9,7 @@ class Knowledge(models.Model):
     department = models.CharField(max_length=255, null=False, blank=False, default="未分類")
     content = models.TextField(blank=True, null=True)  # 存放第一個chunk供使用者預覽
     chunk = models.IntegerField(blank=True, null=True)  # 切割後的chunk數量
+    processing_status = models.CharField(max_length=20, default="pending")  # 'pending', 'processing', 'done', 'error'
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     author = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)

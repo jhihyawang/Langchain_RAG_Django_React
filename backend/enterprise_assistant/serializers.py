@@ -13,12 +13,18 @@ class KnowledgeSerializer(serializers.ModelSerializer):
             "chunk",
             "author",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "processing_status",
         ]
-        read_only_fields = ["id", "chunk", "content", "created_at", "updated_at"]
+        read_only_fields = ["id", "chunk", "content", "created_at", "updated_at","processing_status"]
         
 class EnterpriseQuerySerializer(serializers.Serializer):
     query = serializers.CharField(help_text="使用者查詢內容", required=True)
+    model_name = serializers.ChoiceField(
+        choices=["llama3.2","gemma3"],
+        default="llama3.2",
+        help_text="使用的模型名稱"
+    )
     model_type = serializers.ChoiceField(
         choices=[("cloud", "Cloud"), ("local", "Local")],
         default="cloud",

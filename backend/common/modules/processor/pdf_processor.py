@@ -1,3 +1,5 @@
+import io
+import json
 import os
 import re
 import time
@@ -32,7 +34,7 @@ class PdfProcessor:
         self.processor = AutoProcessor.from_pretrained("microsoft/table-transformer-detection", revision="no_timm")
         self.cid_threshold = cid_threshold
         #self.vectorstore = vectorstore or VectorStoreHandler(db_path="chroma_user_db")
-
+        self.log = log
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "images"), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "tables"), exist_ok=True)
@@ -93,11 +95,10 @@ class PdfProcessor:
         print(f"表格提取範圍:{[x1, y1, x2, y2]}")
 
         # X軸範圍：從表格最左邊到表格寬度的 3/4
-        x_range = (x1*0.8, x1 + (x2 - x1) * 0.75)
+        x_range = (x1, x1 + (x2 - x1) * 0.75)
         
         # Y軸範圍：從表格上方的空間的 1/2 開始到表格上邊緣
-        print(y1*0.4)
-        y_range = (y1*0.6, y1)
+        y_range = (y1-100, y1)
 
         print(f"標題提取範圍:{[x_range[0], y_range[0], x_range[1], y_range[1]]}")
                 # 在原始圖像上畫出標題範圍
@@ -116,7 +117,6 @@ class PdfProcessor:
         # 將所有文字合併為一個字串，用換行分隔
         return "\n".join([item[1] for item in result]) if result else "無標題"
 
-
     def rotate_original_pdf(self, file_path, rotated_pages):
         log("rotate this file")
         doc = fitz.open(file_path)
@@ -128,7 +128,16 @@ class PdfProcessor:
         temp_path = file_path + ".rotated.pdf"
         doc.save(temp_path)
         doc.close()
-        os.replace(temp_path, file_path)
+
+        # 刪除舊文件，然後重命名新文件
+        try:
+            os.remove(file_path)  # 刪除原文件
+            os.rename(temp_path, file_path)  # 重命名臨時檔案
+            log(f"檔案已成功替換：{file_path}")
+        except PermissionError as e:
+            log(f"無法替換檔案：{e}")
+            raise
+
         return file_path
     
     def calculate_table_area_each_page(self,box,total_table_area) -> float:
@@ -137,11 +146,16 @@ class PdfProcessor:
         total_table_area += table_area
         return total_table_area
         
-    def extract_table(self,img,i,j,box,table_blocks):
+    def extract_table(self,img,i,j,box,table_blocks,split_index=0):
         coords = box.tolist()  # [x1, y1, x2, y2]
-        expand_coords = [coords[0]*0.9,coords[1]*0.75,coords[2]*1.1,coords[3]*1.1]
+        expand_coords = [
+            min(coords[0] - 50, coords[0]),
+            min(coords[1] - 50, coords[1]),
+            max(coords[2] + 50, coords[2]),
+            max(coords[3] + 50, coords[3])
+        ]
         cropped = img.crop(expand_coords)
-        path = os.path.join(self.output_dir, "tables", f"page{i}_table{j+1}.png")
+        path = os.path.join(self.output_dir, "tables", f"part_{split_index}_page{i}_table{j+1}.png")
         cropped.save(path)
         ocr = self.reader.readtext(np.array(cropped))
         merged = "\n".join([r[1] for r in ocr])
@@ -197,11 +211,11 @@ class PdfProcessor:
             })
         return table_results
 
-    def extract_texts(self,page,i,page_images,text_results):
+    def extract_texts(self,page,i,page_images,text_results,split_index=0):
         text = page.extract_text() or ""
         if self.should_ocr(text):
             img = page_images[i]
-            path = os.path.join(self.output_dir, "ocr_fallback", f"page_{i}.png")
+            path = os.path.join(self.output_dir, "ocr_fallback", f"part_{split_index}_page_{i}.png")
             img.save(path)
             ocr_result = self.reader.readtext(np.array(img))
             ocr_text = "\n".join([text for _, text, conf in ocr_result if conf > 0.5]) if ocr_result else ""
@@ -222,7 +236,7 @@ class PdfProcessor:
             })
         return text_results
             
-    def extract_imgs(self,doc,i,image_results):
+    def extract_imgs(self, doc, i, image_results,split_index=0):
         # 處理圖片
         fitz_page = doc.load_page(i - 1)
         image_list = fitz_page.get_images(full=True)
@@ -234,42 +248,85 @@ class PdfProcessor:
             image_bytes = base_image["image"]
             image_ext = base_image["ext"]
 
-            img_name = f"page_{i}_img_{img_index + 1}.{image_ext}"
-            img_path = os.path.join(self.output_dir, "images", img_name)
-            with open(img_path, "wb") as f:
-                f.write(image_bytes)
-            print(f"圖片 {img_index + 1} 已儲存：{img_path}")
-
-            img = Image.open(img_path)
+            # 將圖片轉換為 PIL 圖像進行 OCR
+            img = Image.open(io.BytesIO(image_bytes))
             img_array = np.array(img)
             ocr_result = self.reader.readtext(img_array)
             ocr_text = "\n".join([text for _, text, conf in ocr_result if conf > 0.5]) if ocr_result else ""
             print(f"OCR 結果: {ocr_result}")
 
-            if ocr_text:
-                print(f"OCR 結果: {ocr_text}")
-                prompt = "請描述圖片內容，若為圖表請指出類型、X/Y軸意義、趨勢與關鍵變化，若非圖表請描述主要構成與重要資訊"
-                summary = self.summarize_image(img_path, prompt)
-                log(f"🖼️ 第 {i} 頁圖片摘要完成：[ocr]{ocr_text}\n[llm]{summary[:80]}...")
-                image_results.append({
-                    "page": i,
-                    "source": img_path,
-                    "content": summary
-                })
-            else:
+            # 如果 OCR 結果長度小於 8 字，則丟棄圖片，跳過儲存
+            if len(ocr_text) < 8:
                 log(f"⚠️ 第 {i} 頁第 {img_index + 1} 張圖片 OCR 結果少於 8 字，已略過")
+                continue  # 跳過這張圖片，直接處理下一張
+
+            # 儲存圖片
+            img_name = f"part{split_index}_page_{i}_img_{img_index + 1}.{image_ext}"
+            img_path = os.path.join(self.output_dir, "images", img_name)
+            with open(img_path, "wb") as f:
+                f.write(image_bytes)
+            print(f"圖片 {img_index + 1} 已儲存：{img_path}")
+
+            # 如果 OCR 結果長度符合條件，繼續處理圖片摘要
+            print(f"OCR 結果: {ocr_text}")
+            prompt = "請描述圖片內容，若為圖表請指出類型、X/Y軸意義、趨勢與關鍵變化，若非圖表請描述主要構成與重要資訊"
+            summary = self.summarize_image(img_path, prompt)
+            log(f"🖼️ 第 {i} 頁圖片摘要完成：[ocr]{ocr_text}\n[llm]{summary[:80]}...")
+
+            image_results.append({
+                "page": i,
+                "source": img_path,
+                "content": summary
+            })
+
         return image_results
-    
+
+
+    def split_pdf(self, pages_per_split_min=30, pages_per_split_max=40):
+        # 打開原始 PDF 文件
+        doc = fitz.open(self.pdf_path)
+        total_pages = doc.page_count
+
+        # 計算每份的頁數
+        pages_per_split = (total_pages // (total_pages // pages_per_split_max))  # 每份大約 30-40 頁
+        if pages_per_split < pages_per_split_min:
+            pages_per_split = pages_per_split_min  # 保證每個文件至少有 30 頁
+
+        # 創建輸出目錄
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # 拆分文件
+        split_pdfs = []
+        for start_page in range(0, total_pages, pages_per_split):
+            end_page = min(start_page + pages_per_split, total_pages)
+            
+            # 提取拆分範圍
+            split_doc = fitz.open()
+            for i in range(start_page, end_page):
+                split_doc.insert_pdf(doc, from_page=i, to_page=i)
+            
+            # 儲存拆分後的 PDF
+            split_pdf_name = f"{self.file_stem}_part_{start_page // pages_per_split + 1}.pdf"
+            split_pdf_path = os.path.join(self.output_dir, split_pdf_name)
+            split_doc.save(split_pdf_path)
+            split_pdfs.append(split_pdf_path)
+            split_doc.close()
+            
+            self.log(f"拆分文件 {split_pdf_name} 已儲存，範圍：第 {start_page + 1} 頁 到 第 {end_page} 頁")
+
+        doc.close()
+        return split_pdfs
+
     # 原先使用 table-transformer 的表格偵測流程，改為使用 pdfplumber 的 page.find_tables()
     # 並且僅在需要處理圖片摘要的情境下才使用 convert_from_path
-    def optimized_process(self):
+    def process(self,split_index,pdf_split):
         import time
         start_time = time.time()
         text_results, table_results, image_results = [], [], []
         table_pages = []
 
-        doc = fitz.open(self.pdf_path)
-        pdf = pdfplumber.open(self.pdf_path)
+        doc = fitz.open(pdf_split)
+        pdf = pdfplumber.open(pdf_split)
 
         page_images = []  # 延後轉換圖片
         need_page_image = set()
@@ -292,7 +349,7 @@ class PdfProcessor:
         # 只轉換需要的頁面圖片
         if need_page_image:
             log(f"🖼️ convert_from_path 轉換頁面: {sorted(need_page_image)}")
-            page_images_all = convert_from_path(self.pdf_path)
+            page_images_all = convert_from_path(pdf_split)
             page_images = {i: page_images_all[i - 1] for i in need_page_image}
 
         # 首先處理表格頁
@@ -319,42 +376,109 @@ class PdfProcessor:
             
             #頁面長寬
             # 獲取頁面邊界資訊
-            page_rect = page.rects[0]
-            page_width = page_rect['x1'] - page_rect['x0']  # 計算寬度
-            page_height = page_rect['y1'] - page_rect['y0']  # 計算高度
+            #page_rect = page.rects[0]
+            page_width = page.width  # 計算寬度
+            page_height = page.height  # 計算高度
             page_area = page_width * page_height
             total_table_area = 0
             for j, box in enumerate(results["boxes"]):
                 # 計算表格佔頁面面積的比例
                 total_table_area = self.calculate_table_area_each_page(box,total_table_area)
-                table_blocks = self.extract_table(img,i,j,box,table_blocks)
+                table_blocks = self.extract_table(img,i,j,box,table_blocks,split_index)
                 
             table_area_ratio =  total_table_area / page_area if page_area > 0 else 0.0
             log(f"第 {i} 頁的表格佔頁面面積比例為：{table_area_ratio:.2f}")
              # 如果表格佔比小於50%，進行文字和圖片提取
             if table_area_ratio < 0.5:
                 log(f"表格佔比小於50%，開始進行文字和圖片提取...")
-                text_results = self.extract_texts(page, i, page_images, text_results)
-                image_results = self.extract_imgs(doc, i, image_results)
+                text_results = self.extract_texts(page, i, page_images, text_results,split_index)
+                image_results = self.extract_imgs(doc, i, image_results, split_index)
                 
         table_results = self.group_tables_summary(table_blocks,table_results)
         # 表格處理完成後，再處理沒有表格的頁面
         for i, page in enumerate(pdf.pages, start=1):
             if i in table_pages:
                 continue  # 跳過表格頁
-            text_results = self.extract_texts(page,i,page_images,text_results)
+            text_results = self.extract_texts(page,i,page_images,text_results,split_index)
             # 處理圖片
-            image_results = self.extract_imgs(doc,i,image_results)
+            image_results = self.extract_imgs(doc,i,image_results,split_index)
             
-        if rotated_pages:
-            self.rotate_original_pdf(self.pdf_path, rotated_pages)
-
         pdf.close()
+        doc.close()
+                    
+        if rotated_pages:
+            self.rotate_original_pdf(pdf_split, rotated_pages)
+        
         end_time = time.time()
-        log(f"✅ PDF 全部處理完成，用時 {end_time - start_time:.2f} 秒")
+        log(f"PDF {split_index} 處理完成，用時 {end_time - start_time:.2f} 秒")
 
         return {"text": text_results, "table": table_results, "image": image_results}
+    
+    def save_split_result(self, result, split_index):
+        """
+        儲存單一拆分結果（可重複呼叫，不會覆蓋）
+        """
+        result_path = os.path.join(self.output_dir, f"result_part_{split_index}.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        self.log(f"📄 第 {split_index + 1} 段結果已儲存至 {result_path}")
+     
+    def save_results(self, result):
+        """
+        儲存所有處理結果為總結檔
+        """
+        result_path = os.path.join(self.output_dir, "results.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        self.log(f"📝 全部結果已統一儲存至 {result_path}")
+        
+    
+    def merge_pdfs(self, split_pdfs):
+        """
+        將拆分後的 PDF 合併回一個單一文件，並將合併結果覆蓋原始的 PDF 檔案，並刪除分割的檔案
+        """
+        merged_pdf_path = os.path.join(self.output_dir, f"{self.file_stem}_merged.pdf")
+        merged_doc = fitz.open()
 
+        # 合併所有拆分的 PDF
+        for split_pdf in split_pdfs:
+            split_doc = fitz.open(split_pdf)
+            merged_doc.insert_pdf(split_doc)
+            split_doc.close()  # ✅ 確保釋放檔案鎖
+
+        # 儲存合併後的 PDF
+        merged_doc.save(merged_pdf_path)
+        merged_doc.close()
+
+        # 覆蓋原始的 PDF 檔案
+        os.replace(merged_pdf_path, self.pdf_path)  # 替換為原始 PDF
+        self.log(f"📎 PDF 已合併並覆蓋原始檔案：{self.pdf_path}")
+
+        # ✅ 刪除所有拆分後的 PDF
+        for split_pdf in split_pdfs:
+            try:
+                os.remove(split_pdf)
+                self.log(f"🗑️ 已刪除拆分檔案：{split_pdf}")
+            except Exception as e:
+                self.log(f"⚠️ 無法刪除檔案 {split_pdf}：{str(e)}")
+
+
+    def optimized_process(self):
+        split_pdfs = self.split_pdf()
+        all_results = {"text": [], "table": [], "image": []}
+        
+        for split_index, split_pdf in enumerate(split_pdfs):
+            split_pdf_path = split_pdf
+            result = self.process(split_index, split_pdf_path)
+            self.save_split_result(result, split_index)
+            all_results["text"].extend(result["text"])
+            all_results["table"].extend(result["table"])
+            all_results["image"].extend(result["image"])
+            
+        self.save_results(all_results)
+        self.merge_pdfs(split_pdfs)
+        
+        return all_results
 
 if __name__ == "__main__":
     processor = PdfProcessor("test.pdf")

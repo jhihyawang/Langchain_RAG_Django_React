@@ -14,5 +14,5 @@ urlpatterns = [
     path("knowledge/chunk/<str:chunk_id>/", ChunkDetailView.as_view(), name="chunk-detail"),
 
     # 查詢 API
-    path("query_enterprise/", EnterpriseQueryView.as_view(), name="enterprise-query"),
+    path("query_user/", EnterpriseQueryView.as_view(), name="enterprise-query"),
 ]
