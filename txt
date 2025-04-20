@@ -1,41 +1,28 @@
-import os
-import shutil
-from django.conf import settings
+def merge_pdfs(self, split_pdfs):
+    """
+    將拆分後的 PDF 合併回一個單一文件，並將合併結果覆蓋原始的 PDF 檔案，並刪除分割的檔案
+    """
+    merged_pdf_path = os.path.join(self.output_dir, f"{self.file_stem}_merged.pdf")
+    merged_doc = fitz.open()
 
-def delete(self, request, *args, **kwargs):
-    knowledge = self.get_object()
-    file_name = os.path.basename(knowledge.file.name) if knowledge.file else None
-    knowledge_id = knowledge.id
-    filename_without_ext = os.path.splitext(file_name)[0]
+    # 合併所有拆分的 PDF
+    for split_pdf in split_pdfs:
+        split_doc = fitz.open(split_pdf)
+        merged_doc.insert_pdf(split_doc)
+        split_doc.close()  # ✅ 確保釋放檔案鎖
 
-    # ✅ 上傳檔案的完整實體路徑（適用於 Windows）
-    original_file_path = os.path.join(settings.MEDIA_ROOT, "knowledge_files", file_name) if file_name else None
+    # 儲存合併後的 PDF
+    merged_doc.save(merged_pdf_path)
+    merged_doc.close()
 
-    # ✅ 對應的 extract_data 資料夾路徑
-    extract_dir = os.path.join(settings.MEDIA_ROOT, "extract_data", filename_without_ext) if filename_without_ext else None
+    # 覆蓋原始的 PDF 檔案
+    os.replace(merged_pdf_path, self.pdf_path)  # 替換為原始 PDF
+    self.log(f"📎 PDF 已合併並覆蓋原始檔案：{self.pdf_path}")
 
-    try:
-        # 1️⃣ 刪除資料庫紀錄
-        knowledge.delete()
-
-        # 2️⃣ 刪除向量資料庫內容
-        vectorstore.delete(knowledge_id)
-
-        # 3️⃣ 刪除 extract_data 資料夾（包含子檔案）— 在 Windows 下使用 shutil.rmtree()
-        if extract_dir and os.path.exists(extract_dir):
-            shutil.rmtree(extract_dir)
-            print(f"✅ 已刪除資料夾：{extract_dir}")
-        else:
-            print(f"⚠️ 未找到 extract_data 資料夾：{extract_dir}")
-
-        # 4️⃣ 刪除原始 PDF 檔案
-        if original_file_path and os.path.exists(original_file_path):
-            os.remove(original_file_path)
-            print(f"✅ 已刪除檔案：{original_file_path}")
-        else:
-            print(f"⚠️ 未找到上傳檔案：{original_file_path}")
-
-        return standard_response(message="已刪除知識文件")
-
-    except Exception as e:
-        return standard_response(message=f"刪除過程中出現錯誤: {str(e)}", status="error")
+    # ✅ 刪除所有拆分後的 PDF
+    for split_pdf in split_pdfs:
+        try:
+            os.remove(split_pdf)
+            self.log(f"🗑️ 已刪除拆分檔案：{split_pdf}")
+        except Exception as e:
+            self.log(f"⚠️ 無法刪除檔案 {split_pdf}：{str(e)}")
