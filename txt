@@ -1,12 +1,10 @@
-python manage.py process_tasks
-
-# settings.py
-INSTALLED_APPS = [
-    ...
-    "background_task",
-]
-
-python manage.py migrate
-
-python manage.py process_tasks
-python manage.py runserver
+{
+  "python.defaultInterpreterPath": ".venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.formatting.provider": "black",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  }
+}
