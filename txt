@@ -1,22 +1,68 @@
-def rotate_original_pdf(self, file_path, rotated_pages):
-    log("rotate this file")
-    doc = fitz.open(file_path)
-    for page_index in rotated_pages:
-        page = doc[page_index - 1]
-        page.set_rotation((page.rotation + 90) % 360)
-        log(f"========== Page {page_index} has been rotated 90 degrees ==========")
+    def post(self, request, *args, **kwargs):
+        if "file" not in request.FILES:
+            return standard_response(False, "請上傳文件")
 
-    temp_path = file_path + ".rotated.pdf"
-    doc.save(temp_path)
-    doc.close()
+        file = request.FILES["file"]
+        department = request.data.get("department", "")
+        author = request.data.get("author", None)
 
-    # 刪除舊文件，然後重命名新文件
-    try:
-        os.remove(file_path)  # 刪除原文件
-        os.rename(temp_path, file_path)  # 重命名臨時檔案
-        log(f"檔案已成功替換：{file_path}")
-    except PermissionError as e:
-        log(f"無法替換檔案：{e}")
-        raise
+        # 檢查文件類型，僅允許 PDF 文件
+        if not file.name.endswith('.pdf'):
+            return standard_response(False, "僅允許上傳 PDF 文件")
 
-    return file_path
+        # 檢查文件大小（以 10MB 為例）
+        if file.size > 10 * 1024 * 1024:
+            return standard_response(False, "文件大小不能超過 10MB")
+
+        # 自動設定 title 為上傳檔案名稱（不含副檔名）
+        title = os.path.splitext(file.name)[0]
+
+        try:
+            # 使用事務來確保資料庫一致性
+            with transaction.atomic():
+                # 先創建 Knowledge 實例
+                knowledge = Knowledge.objects.create(
+                    file=file,
+                    title=title,
+                    department=department,
+                    author_id=author
+                )
+
+                # 處理 PDF 文件並獲取結果
+                file_path = knowledge.file.path
+                processor = PdfProcessor(pdf_path=file_path)
+                try:
+                    result = processor.optimized_process()
+                except Exception as e:
+                    return standard_response(False, f"處理文件時發生錯誤: {str(e)}")
+
+                # 儲存資料至向量庫
+                for media_type in ["text", "table", "image"]:
+                    for item in result.get(media_type, []):
+                        success = vectorstore.add(
+                            content=item["content"],
+                            page=json.dumps(item["page"] if isinstance(item["page"], list) else [item["page"]]),
+                            document_id=knowledge.id,
+                            media_type=media_type,
+                            source=json.dumps(item["source"] if isinstance(item["source"], list) else [item["source"]])
+                        )
+                        if not success:
+                            raise ValidationError(f"無法儲存 {media_type} 到向量庫，頁面 {item['page']} 未儲存。")
+
+                # 更新摘要與 chunk 數
+                chunks = vectorstore.list(knowledge.id)
+                first_chunk = chunks[0]["content"] if chunks else ""
+                knowledge.content = first_chunk
+                knowledge.chunk = len(chunks)
+                knowledge.save()
+
+                print(f"✅ 上傳文件完成，產生 {len(chunks)} 個 chunks 並儲存至向量庫")
+
+                return standard_response(message="文件上傳成功", data=KnowledgeSerializer(knowledge).data)
+
+        except ValidationError as e:
+            # 若儲存過程中發生錯誤，回滾資料庫操作
+            return standard_response(False, f"資料儲存失敗: {str(e)}")
+        except Exception as e:
+            # 捕獲其他錯誤並返回
+            return standard_response(False, f"上傳過程中發生錯誤: {str(e)}")
