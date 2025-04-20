@@ -7,3 +7,6 @@ INSTALLED_APPS = [
 ]
 
 python manage.py migrate
+
+python manage.py process_tasks
+python manage.py runserver
