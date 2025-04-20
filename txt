@@ -1,11 +1,21 @@
-    def rotate_original_pdf(self, file_path, rotated_pages):
-        log(f"開始旋轉：{file_path}")
-        doc = fitz.open(file_path)
-        for page_index in rotated_pages:
-            page = doc[page_index - 1]
-            page.set_rotation((page.rotation + 90) % 360)
-        temp_path = file_path + ".rotated.pdf"
-        doc.save(temp_path)
-        doc.close()
-        log(f"旋轉完成，儲存至：{temp_path}")
-        return temp_path
+def optimized_process(self):
+    split_pdfs = self.split_pdf()
+    all_results = {"text": [], "table": [], "image": []}
+    final_pdf_parts = []
+
+    for split_index, split_pdf in enumerate(split_pdfs):
+        result = self.process(split_index, split_pdf)
+        self.save_results(result)
+        all_results["text"].extend(result["text"])
+        all_results["table"].extend(result["table"])
+        all_results["image"].extend(result["image"])
+        final_pdf_parts.append(result["rotated_pdf"])  # 用旋轉後的版本
+
+    self.merge_pdfs(final_pdf_parts)  # 合併所有旋轉後的部分檔案（取代原來 split_pdfs）
+
+    # ✅ 刪除原始未旋轉版本
+    for f in split_pdfs:
+        if os.path.exists(f):
+            os.remove(f)
+
+    return all_results
