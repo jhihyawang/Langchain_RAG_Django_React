@@ -1,10 +1,22 @@
-{
-  "python.defaultInterpreterPath": ".venv/bin/python",
-  "python.terminal.activateEnvironment": true,
-  "python.analysis.typeCheckingMode": "basic",
-  "python.formatting.provider": "black",
-  "editor.formatOnSave": true,
-  "editor.codeActionsOnSave": {
-    "source.organizeImports": "explicit"
-  }
-}
+def rotate_original_pdf(self, file_path, rotated_pages):
+    log("rotate this file")
+    doc = fitz.open(file_path)
+    for page_index in rotated_pages:
+        page = doc[page_index - 1]
+        page.set_rotation((page.rotation + 90) % 360)
+        log(f"========== Page {page_index} has been rotated 90 degrees ==========")
+
+    temp_path = file_path + ".rotated.pdf"
+    doc.save(temp_path)
+    doc.close()
+
+    # 刪除舊文件，然後重命名新文件
+    try:
+        os.remove(file_path)  # 刪除原文件
+        os.rename(temp_path, file_path)  # 重命名臨時檔案
+        log(f"檔案已成功替換：{file_path}")
+    except PermissionError as e:
+        log(f"無法替換檔案：{e}")
+        raise
+
+    return file_path
