@@ -1,44 +1,10 @@
-def extract_imgs(self, doc, i, image_results):
-    # 處理圖片
-    fitz_page = doc.load_page(i - 1)
-    image_list = fitz_page.get_images(full=True)
-    print(f"📄 第 {i} 頁找到 {len(image_list)} 張圖片")
-
-    for img_index, img_info in enumerate(image_list):
-        xref = img_info[0]
-        base_image = doc.extract_image(xref)
-        image_bytes = base_image["image"]
-        image_ext = base_image["ext"]
-
-        # 將圖片轉換為 PIL 圖像進行 OCR
-        img = Image.open(io.BytesIO(image_bytes))
-        img_array = np.array(img)
-        ocr_result = self.reader.readtext(img_array)
-        ocr_text = "\n".join([text for _, text, conf in ocr_result if conf > 0.5]) if ocr_result else ""
-        print(f"OCR 結果: {ocr_result}")
-
-        # 如果 OCR 結果長度小於 8 字，則丟棄圖片，跳過儲存
-        if len(ocr_text) < 8:
-            log(f"⚠️ 第 {i} 頁第 {img_index + 1} 張圖片 OCR 結果少於 8 字，已略過")
-            continue  # 跳過這張圖片，直接處理下一張
-
-        # 儲存圖片
-        img_name = f"page_{i}_img_{img_index + 1}.{image_ext}"
-        img_path = os.path.join(self.output_dir, "images", img_name)
-        with open(img_path, "wb") as f:
-            f.write(image_bytes)
-        print(f"圖片 {img_index + 1} 已儲存：{img_path}")
-
-        # 如果 OCR 結果長度符合條件，繼續處理圖片摘要
-        print(f"OCR 結果: {ocr_text}")
-        prompt = "請描述圖片內容，若為圖表請指出類型、X/Y軸意義、趨勢與關鍵變化，若非圖表請描述主要構成與重要資訊"
-        summary = self.summarize_image(img_path, prompt)
-        log(f"🖼️ 第 {i} 頁圖片摘要完成：[ocr]{ocr_text}\n[llm]{summary[:80]}...")
-
-        image_results.append({
-            "page": i,
-            "source": img_path,
-            "content": summary
-        })
-
-    return image_results
+{
+  "python.defaultInterpreterPath": ".venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.formatting.provider": "black",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  }
+}
