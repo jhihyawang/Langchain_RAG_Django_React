@@ -17,7 +17,16 @@ const KnowledgeManager = () => {
     const totalPages = Math.ceil(pageInfo.count / pageSize);
 
     useEffect(() => {
+        // 第一次掛載時立即取得資料
         fetchKnowledge();
+
+        // 每 5 秒自動刷新一次列表（可即時反映處理中狀態）
+        const interval = setInterval(() => {
+            fetchKnowledge();
+        }, 5000);
+
+        // 離開元件時清除定時器
+        return () => clearInterval(interval);
     }, []);
 
     const fetchKnowledge = async (url = `${API_BASE_URL}/api/knowledge/`) => {
@@ -86,55 +95,31 @@ const KnowledgeManager = () => {
         }
     };
 
-    const handleUpdate = async () => {
-        if (!file || !selectedId) {
-            alert("請選擇要更新的文件！");
-            return;
+    const handleDelete = async (item) => {
+        let confirmMsg = "確定要刪除這份文件嗎？";
+
+        if (item.processing_status === "processing") {
+            confirmMsg = "⚠️ 該文件正在處理中，是否強制刪除並中止後端處理？";
         }
 
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("department", department);
+        if (!window.confirm(confirmMsg)) return;
 
         try {
-            const res = await fetch(`${API_BASE_URL}/api/knowledge/${selectedId}/`, {
-                method: "PUT",
-                body: formData,
-            });
-
-            if (res.ok) {
-                alert("檔案更新成功！");
-                setFile(null);
-                setDepartment("");
-                setSelectedId(null);
-                setSelectedFileName("");
-                fetchKnowledge();
-            } else {
-                alert("更新失敗！");
-            }
-        } catch (error) {
-            console.error("❌ 更新失敗", error);
-        }
-    };
-
-    const handleDelete = async (id) => {
-        if (!window.confirm("確定要刪除嗎？")) return;
-
-        try {
-            const res = await fetch(`${API_BASE_URL}/api/knowledge/${id}/`, {
+            const res = await fetch(`${API_BASE_URL}/api/knowledge/${item.id}/`, {
                 method: "DELETE",
             });
 
             if (res.ok) {
-                alert("刪除成功！");
+                alert("✅ 刪除成功！");
                 fetchKnowledge();
             } else {
-                alert("刪除失敗！");
+                alert("❌ 刪除失敗！");
             }
         } catch (error) {
             console.error("❌ 刪除失敗", error);
         }
     };
+
 
     return (
         <div className="container mt-4">
@@ -183,8 +168,23 @@ const KnowledgeManager = () => {
                                 <td>{new Date(item.updated_at).toLocaleString()}</td>
                                 <td>{item.author || "—"}</td>
                                 <td>
-                                    <button className="btn btn-warning btn-sm me-2" onClick={() => navigate(`/knowledge/edit/${item.id}`)}>編輯chunks</button>
-                                    <button className="btn btn-danger btn-sm" onClick={() => handleDelete(item.id)}>刪除檔案</button>
+                                    {item.processing_status === "processing" ? (
+                                        <button
+                                            className="btn btn-secondary btn-sm me-2"
+                                            disabled
+                                            title="處理中，尚無法編輯"
+                                        >
+                                            ⏳ 處理中
+                                        </button>
+                                    ) : (
+                                        <button className="btn btn-warning btn-sm me-2"
+                                            onClick={() => navigate(`/knowledge/edit/${item.id}`)}>
+                                            編輯chunks
+                                        </button>
+                                    )}
+                                    <button className="btn btn-danger btn-sm" onClick={() => handleDelete(item)}>
+                                        刪除檔案
+                                    </button>
                                 </td>
                                 <td>
                                     {item.processing_status === "done" && <span className="text-success">✅ 完成</span>}
