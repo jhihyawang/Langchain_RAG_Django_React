@@ -1,13 +1,9 @@
-part_results = []
-for split_index, split_pdf in enumerate(split_pdfs):
-    result = self.process(split_index, split_pdf)
-    self.save_split_result(result, split_index)
-    part_results.append(result)
+python manage.py process_tasks
 
-self.save_results(part_results)
+# settings.py
+INSTALLED_APPS = [
+    ...
+    "background_task",
+]
 
-def save_results(self, result_list):
-    result_path = os.path.join(self.output_dir, "results.json")
-    with open(result_path, "w", encoding="utf-8") as f:
-        json.dump(result_list, f, ensure_ascii=False, indent=2)
-    self.log(f"📝 所有段落結果已儲存至 {result_path}")
+python manage.py migrate
