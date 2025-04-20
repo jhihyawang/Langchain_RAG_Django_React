@@ -1,1 +1,41 @@
-filename_without_ext = os.path.splitext(basename)[0]
+import os
+import shutil
+from django.conf import settings
+
+def delete(self, request, *args, **kwargs):
+    knowledge = self.get_object()
+    file_name = os.path.basename(knowledge.file.name) if knowledge.file else None
+    knowledge_id = knowledge.id
+    filename_without_ext = os.path.splitext(file_name)[0]
+
+    # ✅ 上傳檔案的完整實體路徑（適用於 Windows）
+    original_file_path = os.path.join(settings.MEDIA_ROOT, "knowledge_files", file_name) if file_name else None
+
+    # ✅ 對應的 extract_data 資料夾路徑
+    extract_dir = os.path.join(settings.MEDIA_ROOT, "extract_data", filename_without_ext) if filename_without_ext else None
+
+    try:
+        # 1️⃣ 刪除資料庫紀錄
+        knowledge.delete()
+
+        # 2️⃣ 刪除向量資料庫內容
+        vectorstore.delete(knowledge_id)
+
+        # 3️⃣ 刪除 extract_data 資料夾（包含子檔案）— 在 Windows 下使用 shutil.rmtree()
+        if extract_dir and os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+            print(f"✅ 已刪除資料夾：{extract_dir}")
+        else:
+            print(f"⚠️ 未找到 extract_data 資料夾：{extract_dir}")
+
+        # 4️⃣ 刪除原始 PDF 檔案
+        if original_file_path and os.path.exists(original_file_path):
+            os.remove(original_file_path)
+            print(f"✅ 已刪除檔案：{original_file_path}")
+        else:
+            print(f"⚠️ 未找到上傳檔案：{original_file_path}")
+
+        return standard_response(message="已刪除知識文件")
+
+    except Exception as e:
+        return standard_response(message=f"刪除過程中出現錯誤: {str(e)}", status="error")
