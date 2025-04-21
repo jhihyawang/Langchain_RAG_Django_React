@@ -1,6 +1,7 @@
 # tasks.py
 import json
 
+import fitz  # PyMuPDF
 from background_task import background
 from common.modules.processor.pdf_processor import PdfProcessor
 from common.modules.processor.vector_store import VectorStoreHandler
@@ -39,13 +40,33 @@ def process_pdf_background(knowledge_id):
                         source=json.dumps(item["source"] if isinstance(item["source"], list) else [item["source"]])
                     )
 
-            # ✅ 更新資料庫資訊
+           # ✅ 更新資料庫資訊
             chunks = vectorstore.list(knowledge_id)
             first_chunk = chunks[0]["content"] if chunks else ""
             knowledge.content = first_chunk
             knowledge.chunk = len(chunks)
+
+            # ✅ 執行旋轉（針對原始檔案）
+            rotated_pages = result.get("rotate_page", [])
+            if rotated_pages:
+                log_msg = f"🔁 旋轉原始 PDF 頁碼：{rotated_pages}"
+                print(log_msg)
+
+                try:
+                    doc = fitz.open(knowledge.file.path)
+                    for page_number in rotated_pages:
+                        page = doc[page_number - 1]
+                        page.set_rotation((page.rotation + 90) % 360)
+                        print(f"✅ 已旋轉第 {page_number} 頁")
+                    doc.saveIncr()  # 儲存原始檔案（in-place）
+                    doc.close()
+                except Exception as e:
+                    print(f"❌ 無法旋轉 PDF：{e}")
+
+            # ✅ 儲存處理完成狀態
             knowledge.processing_status = "done"
             knowledge.save()
+
 
     except Exception as e:
         knowledge.processing_status = "error"
