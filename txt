@@ -1,13 +1,2 @@
-from django.core.exceptions import ValidationError
-
-class Knowledge(models.Model):
-    title = models.CharField(max_length=255)
-    file = models.FileField(upload_to="knowledge_files/")
-
-    def clean(self):
-        super().clean()
-        if self.file:
-            if not self.file.name.lower().endswith(".pdf"):
-                raise ValidationError("只允許上傳 PDF 檔案")
-            if self.file.content_type != "application/pdf":
-                raise ValidationError("檔案格式不正確，請上傳 PDF")
+     if not file.name.lower().endswith(".pdf"):
+            return Response({"error": "只允許上傳 PDF"}, status=400)
