@@ -1,24 +1,13 @@
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import Chroma
+from django.core.exceptions import ValidationError
 
-embedding_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-m3",
-    encode_kwargs={"normalize_embeddings": True}
-)
+class Knowledge(models.Model):
+    title = models.CharField(max_length=255)
+    file = models.FileField(upload_to="knowledge_files/")
 
-# 初始化向量庫（可用 FAISS、Chroma 等）
-vectorstore = Chroma(
-    persist_directory="chroma_user_db",
-    embedding_function=embedding_model
-)
-
-# 加入提示詞做查詢
-query = "請問 NDA 合約的簽署流程"
-query_with_prefix = f"Represent this question for retrieving supporting documents: {query}"
-
-retriever = vectorstore.as_retriever(
-    search_type="mmr",  # 或 similarity
-    search_kwargs={"k": 5, "fetch_k": 20}
-)
-
-docs = retriever.invoke(query_with_prefix)
+    def clean(self):
+        super().clean()
+        if self.file:
+            if not self.file.name.lower().endswith(".pdf"):
+                raise ValidationError("只允許上傳 PDF 檔案")
+            if self.file.content_type != "application/pdf":
+                raise ValidationError("檔案格式不正確，請上傳 PDF")
