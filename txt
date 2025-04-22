@@ -114,6 +114,12 @@ const KnowledgeEditPage = () => {
     }
   };
 
+  const mediaTypeLabel = {
+    text: "文字群組",
+    table: "表格群組",
+    image: "圖片群組",
+  };
+
   return (
     <div className="container mt-4">
       <h3>📝 編輯文件內容（ID: {id}）</h3>
@@ -132,6 +138,10 @@ const KnowledgeEditPage = () => {
 
           {page.groups.map((group, gIdx) => (
             <div key={`${page.page_number}-${gIdx}`} className="mb-4">
+              <h6 className="text-primary mb-2">
+                {mediaTypeLabel[group.media_type] || "未知群組"}
+              </h6>
+
               {group.media_type !== "text" && group.source && (
                 <div className="mb-2 text-center">
                   <img
