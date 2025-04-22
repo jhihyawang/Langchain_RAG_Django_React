@@ -1,2 +1,6 @@
-     if not file.name.lower().endswith(".pdf"):
-            return Response({"error": "只允許上傳 PDF"}, status=400)
+    def validate_file(self, file):
+        if not file.name.lower().endswith(".pdf"):
+            raise serializers.ValidationError("只允許上傳 PDF 檔案")
+        if file.content_type != "application/pdf":
+            raise serializers.ValidationError("檔案類型錯誤，請確認為 PDF")
+        return file
