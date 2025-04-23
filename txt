@@ -5,3 +5,20 @@ json_path = os.path.join('media', 'extract_data', 'myfile', 'result.json')
 with open(json_path, 'r', encoding='utf-8') as f:
     data = json.load(f)
 print(data)
+
+
+python.analysis.typeCheckingMode": "basic
+python.formatting.provider": "black"
+editor.formatOnSave": true,
+editor.codeActionsOnSave": { "source.organizeImports": "explicit" }
+
+{
+  "python.defaultInterpreterPath": ".venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.formatting.provider": "black",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  }
+}
