@@ -1,13 +1,7 @@
-# settings.py
-ADMIN_EMAILS = ['admin1@example.com', 'admin2@example.com']
+import json
+import os
 
-from django.conf import settings
-from django.core.mail import send_mail
-
-def notify_admins_when_done(doc_title):
-    subject = f"文件「{doc_title}」已處理完成"
-    message = f"系統通知：文件「{doc_title}」已完成處理，請登入後台查閱。"
-    from_email = None  # 用預設寄件人
-    recipient_list = settings.ADMIN_EMAILS
-
-    send_mail(subject, message, from_email, recipient_list)
+json_path = os.path.join('media', 'extract_data', 'myfile', 'result.json')
+with open(json_path, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+print(data)
