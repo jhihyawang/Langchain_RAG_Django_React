@@ -1,79 +1,13 @@
-{pageGroups.map((page) => {
-  // 篩選每頁的 group.chunks，判斷是否有內容包含關鍵字
-  const filteredGroups = page.groups
-    .map((group) => {
-      const filteredChunks = group.chunks.filter((chunk) =>
-        chunk.content.toLowerCase().includes(searchText.toLowerCase())
-      );
-      return filteredChunks.length > 0
-        ? { ...group, chunks: filteredChunks }
-        : null;
-    })
-    .filter((g) => g !== null);
+# settings.py
+ADMIN_EMAILS = ['admin1@example.com', 'admin2@example.com']
 
-  if (filteredGroups.length === 0) return null;
+from django.conf import settings
+from django.core.mail import send_mail
 
-  return (
-    <div key={page.page_number} className="mb-4 border rounded p-3 bg-light">
-      <h5>📄 頁碼：{page.page_number}</h5>
+def notify_admins_when_done(doc_title):
+    subject = f"文件「{doc_title}」已處理完成"
+    message = f"系統通知：文件「{doc_title}」已完成處理，請登入後台查閱。"
+    from_email = None  # 用預設寄件人
+    recipient_list = settings.ADMIN_EMAILS
 
-      {filteredGroups.map((group, gIdx) => (
-        <div key={`${page.page_number}-${gIdx}`} className="mb-4">
-          <h6 className="mb-2">
-            <span className={mediaTypeBadgeClass[group.media_type] || "badge bg-dark"}>
-              {mediaTypeLabel[group.media_type] || "未知群組"}
-            </span>
-          </h6>
-
-          {group.media_type !== "text" && group.source && (
-            <div className="mb-2 text-center">
-              <img
-                src={`${API_BASE_URL}/${group.source}`}
-                alt={`group-${gIdx}`}
-                style={{ maxWidth: "100%", maxHeight: "300px", border: "1px solid #ccc" }}
-              />
-            </div>
-          )}
-
-          {group.chunks.map((chunk) => (
-            <div className="card my-2" key={chunk.id}>
-              <div className="card-header d-flex justify-content-between align-items-center">
-                <span>
-                  🧩 Chunk #{chunk.chunk_index}
-                  {modifiedChunks.has(chunk.id) && (
-                    <span className="text-warning ms-2">🟡 已修改</span>
-                  )}
-                </span>
-                <button
-                  className="btn btn-sm btn-danger"
-                  onClick={() => handleDeleteChunk(chunk.id)}
-                >
-                  🗑️ 刪除
-                </button>
-              </div>
-              <div className="card-body">
-                <textarea
-                  className="form-control mb-2"
-                  rows="5"
-                  value={chunk.content}
-                  onChange={(e) => {
-                    handleChunkEdit(chunk.id, e.target.value);
-                    setModifiedChunks((prev) => {
-                      const next = new Set(prev);
-                      next.add(chunk.id);
-                      return next;
-                    });
-                  }}
-                ></textarea>
-
-                <div className="text-muted small">
-                  🔗 來源：<code>{group.source}</code>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-})}
+    send_mail(subject, message, from_email, recipient_list)
