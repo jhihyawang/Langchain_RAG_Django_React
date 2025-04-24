@@ -3,395 +3,167 @@ import json
 import os
 import re
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime
 
 import fitz  # PyMuPDF
 import numpy as np
-import ollama
 import pdfplumber
 import torch
 from easyocr import Reader
-from PIL import Image, ImageDraw
+from PIL import Image
+import ollama
 from transformers import AutoModelForObjectDetection, AutoProcessor
 
 
-def _render_page(args):
-   pdf_path, i, table_pages = args
-   doc = fitz.open(pdf_path)
-   page = doc.load_page(i - 1)
-   dpi = 150 if i in table_pages else 100
-   pix = page.get_pixmap(dpi=dpi)
-   img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-   doc.close()
-   return i, img
-
 def log(msg):
-    now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-    print(f"{now} {msg}")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}")
 
+# CPU 渲染+OCR 多進程函式
+def _render_and_ocr(pdf_path, page_no, dpi=100):
+    doc = fitz.open(pdf_path)
+    page = doc.load_page(page_no - 1)
+    pix = page.get_pixmap(dpi=dpi)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    doc.close()
+    # CPU-only OCR
+    reader = Reader(['ch_tra', 'en'], gpu=False)
+    ocr_res = reader.readtext(np.array(img))
+    text = "\n".join([t for _, t, _ in ocr_res if t.strip()])
+    return page_no, img, text
 
 class PdfProcessor:
-    def __init__(
-        self,
-        pdf_path,
-        output_dir="media",
-        model_name="gemma3:27b",
-        knowledge_id=None,
-        vectorstore=None,
-        cid_threshold=20
-    ):
+    def __init__(self, pdf_path, output_dir="media", model_name="gemma3:27b", cid_threshold=20):
         self.pdf_path = pdf_path
-        self.file_stem = os.path.splitext(os.path.basename(pdf_path))[0]
-        self.output_dir = os.path.join(output_dir, "extract_data", self.file_stem)
+        basename = os.path.splitext(os.path.basename(pdf_path))[0]
+        self.workdir = os.path.join(output_dir, "extract_data", basename)
         self.model_name = model_name
-        self.knowledge_id = knowledge_id
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # EasyOCR
-        self.reader = Reader(['ch_tra', 'en'], gpu=torch.cuda.is_available())
-        # 表格偵測 model
-        self.detector = AutoModelForObjectDetection.from_pretrained("microsoft/table-transformer-detection", revision="no_timm").to(self.device)
-        self.processor = AutoProcessor.from_pretrained(
-           "microsoft/table-transformer-detection", revision="no_timm")
         self.cid_threshold = cid_threshold
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # 初始化表格偵測模型與 OCR 工具
+        self.table_detector = AutoModelForObjectDetection.from_pretrained(
+            "microsoft/table-transformer-detection", revision="no_timm"
+        ).to(self.device)
+        self.table_processor = AutoProcessor.from_pretrained(
+            "microsoft/table-transformer-detection", revision="no_timm"
+        )
+        self.cpu_reader = Reader(['ch_tra', 'en'], gpu=False)
+
+        # 建立資料夾
         for sub in ("images", "tables", "ocr_fallback"):
-            os.makedirs(os.path.join(self.output_dir, sub), exist_ok=True)
+            os.makedirs(os.path.join(self.workdir, sub), exist_ok=True)
 
     def should_ocr(self, text: str) -> bool:
-        # 原有 CID 判斷
-        cid_unicode = len(re.findall(r'[\ue000-\uf8ff]', text))
-        cid_marker = len(re.findall(r'\(cid:\d+\)', text))
-        if cid_unicode + cid_marker >= self.cid_threshold:
-            log(f"CID 達標 ({cid_unicode+cid_marker}) → OCR")
-            return True
-        return False
+        cid_count = len(re.findall(r'[\ue000-\uf8ff]', text)) + len(re.findall(r'\(cid:\d+\)', text))
+        return cid_count >= self.cid_threshold or len(text.strip()) < 50
 
-    def summarize_image(self, image_paths, prompt):
-        if isinstance(image_paths, str):
-            image_paths = [image_paths]
-        log("[解析圖片或整頁影像]")
-        system_prompt = (
-            "你是一位針對圖片影像和表格影像進行提取內容的助手"
-            "請還原每張圖片中的文字段落、表格內容"
-            "如果有提供ocr的文字辨識結果也可以參考，文字辨識可能有錯誤，若字詞不合邏輯必須轉換成正常的字詞"
-            "若是圖表完整回傳每筆資料和其趨勢"
-            "若是表格內容用markdown表格格式回傳結果"
+    def summarize_image(self, img_path, prompt: str) -> str:
+        log("LLM 圖像摘要中...")
+        system = (
+            "你是一位針對圖片影像和表格影像進行內容提取的助手，" 
+            "請以 markdown 格式回傳結果。"
         )
         try:
-            response = ollama.chat(
+            res = ollama.chat(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt, "images": image_paths}
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt, "images": [img_path]}
                 ]
             )
-            return response['message']['content']
+            return res['message']['content']
         except Exception as e:
-            return f"❌ 圖像分析錯誤: {str(e)}"
+            return f"❌ LLM 錯誤: {e}"
 
-    def detect_rotation_angle_easyocr(self, ocr_result, min_text_count=5, vertical_angle_range=(75, 105)):
-        vertical_texts, short_texts, tall_boxes = 0, 0, 0
-        total_texts = len(ocr_result)
-        for (box, text, _) in ocr_result:
-            x0, y0 = box[0]; x1, y1 = box[1]
-            dx, dy = x1 - x0, y1 - y0
-            angle = abs(np.arctan2(dy, dx) * 180 / np.pi)
-            if vertical_angle_range[0] <= angle <= vertical_angle_range[1]: vertical_texts += 1
-            if len(text.strip()) <= 1: short_texts += 1
-            w = np.linalg.norm(np.array(box[0]) - np.array(box[1]))
-            h = np.linalg.norm(np.array(box[0]) - np.array(box[3]))
-            if h > w * 2: tall_boxes += 1
-        if total_texts < min_text_count: return 0
-        if vertical_texts / total_texts > 0.5 or short_texts / total_texts > 0.4 or tall_boxes / total_texts > 0.4:
-            return 90
-        return 0
-        
-    def get_title_from_above(self, img, coords):
-        # 計算標題範圍
-        x1, y1, x2, y2 = coords
-        print(f"表格提取範圍:{[x1, y1, x2, y2]}")
-
-        # X軸範圍：從表格最左邊到表格寬度的 3/4
-        x_range = (x1, x1 + (x2 - x1) * 0.75)
-        
-        # Y軸範圍：從表格上方的空間的 1/2 開始到表格上邊緣
-        y_range = (y1-150, y1+50)
-
-        print(f"標題提取範圍:{[x_range[0], y_range[0], x_range[1], y_range[1]]}")
-        # 在原始圖像上畫出標題範圍
-                
-        #draw = ImageDraw.Draw(img)
-        #draw.rectangle([x_range[0], y_range[0], x_range[1], y_range[1]], outline="red", width=3)
-
-        # 顯示圖片
-        #img.show()
-        # 裁切圖片
-        crop = img.crop((x_range[0], y_range[0], x_range[1], y_range[1]))
-
-        # 使用OCR讀取裁切區域的文字
-        result = self.reader.readtext(np.array(crop))
-        title = "\r\n".join([item[1] for item in result]) if result else "無標題"
-        if len(title)>=25:
-            title = "無標題"
-        return title
-    
-    def calculate_table_area(self,box) -> float:
+    def calculate_table_area(self, box) -> float:
         x1, y1, x2, y2 = box
-        total_table_area = abs((x2 - x1) * (y2 - y1))
-        return total_table_area
-        
-    def extract_table(self,img,i,j,box,table_blocks):
-        coords = box.tolist()  # [x1, y1, x2, y2]
-        expand_coords = [coords[0]-50,coords[1],coords[2]+50,coords[3]+50]
-        cropped = img.crop(expand_coords)
-        path = os.path.join(self.output_dir, "tables", f"page{i}_table{j+1}.png")
-        cropped.save(path)
-        ocr = self.reader.readtext(np.array(cropped))
-        merged = "\r\n".join([r[1] for r in ocr])
-        box_width = coords[2] - coords[0]
-        table_title = self.get_title_from_above(img, coords)
-        print(f"檢測到的標題：{table_title}")
-        table_blocks.append({
-            "page": i,
-            "image": path,
-            "ocr_text": merged,
-            "box_width": box_width,
-            "title": table_title
-        })
-        return table_blocks
+        return abs((x2 - x1) * (y2 - y1))
 
-    def group_tables_summary(self,table_blocks,table_results):
-        # 表格群組邏輯
-        table_blocks.sort(key=lambda x: x["page"])
-        grouped, temp = [], [table_blocks[0]] if table_blocks else []
+    def extract_table(self, img, page_no, idx, box, tables):
+        crop = img.crop(box.tolist())
+        path = os.path.join(self.workdir, "tables", f"p{page_no}_t{idx}.png")
+        crop.save(path)
+        # OCR header
+        ocr = self.cpu_reader.readtext(np.array(crop))
+        header = ''
+        if ocr:
+            top_y = min(b[0][1] for b,_,_ in ocr)
+            header = ' '.join(t for b,t,_ in ocr if abs(b[0][1] - top_y) < 5)
+        prompt = f"第{page_no}頁 表格標題: {header}\n請還原表格並以 markdown 格式呈現。"
+        summary = self.summarize_image(path, prompt)
+        tables.append({'page': page_no, 'source': path, 'content': summary, 'header': header})
 
-        for i in range(1, len(table_blocks)):
-            print("===== groping table =====")
-            prev, curr = table_blocks[i-1], table_blocks[i]
-            if (
-                curr["page"] == prev["page"] + 1
-                and abs(curr["box_width"] - prev["box_width"]) / max(prev["box_width"], 1) < 0.05
-                and curr["title"] == "無標題" 
-            ):
-                temp.append(curr)
-            else:
-                grouped.append(temp)
-                temp = [curr]
-        if temp: grouped.append(temp)
-
-        for group_index, group in enumerate(grouped):
-            title = [g["title"] for g in group][0] #跨頁表格以第一個表格標題(因為其他的應該都是"無標題")
-            # texts = [g["ocr_text"] for g in group]
-            # imgs = [g["image"] for g in group]
-            # pages = [g["page"] for g in group]
-            for g in group:
-                texts = g["ocr_text"]
-                imgs = g["image"] 
-                pages = g["page"]
-                print(f"Title: {title}")
-                print(f"OCR: {texts}")
-                prompt = (
-                    f"以下是表格標題：{title}\r\n(如果是無標題請依照表格內容即可)以下是 OCR 內容：\r\n{chr(10).join(texts)}\r\n"
-                    "請根據OCR的內容以及提供的表格圖片還原圖片中表格的架構和每個對應欄位的文字內容，並用markdown表格格式回傳結果"
-                    "請直接描述內容，不需要任何開場白、說明或引導句。"
-                    "僅提供純內容，不要加上:[好的]、[以下是分析]等字句"
-                    )
-                summary = self.summarize_image(imgs, prompt)
-                table_results.append({
-                    "page": pages,
-                    "source": imgs,
-                    #"title": title,
-                    "content": f"[llm]\r\n{summary}",
-                    "media_type":"table"
-                })
-            log(f"📋 表格組 {group_index + 1} LLM完成：{summary[:80]}...")
-        return table_results
-
-    def extract_texts(self,page,i,page_images,text_results):
-        text = page.extract_text() or ""
-        if self.should_ocr(text):
-            img = page_images[i]
-            path = os.path.join(self.output_dir, "ocr_fallback", f"page_{i}.png")
+    def extract_images(self, doc, page_no, images):
+        fp = doc.load_page(page_no - 1)
+        for idx, img_info in enumerate(fp.get_images(full=True)):
+            data = doc.extract_image(img_info[0])
+            img = Image.open(io.BytesIO(data['image']))
+            ocr = self.cpu_reader.readtext(np.array(img))
+            txt = "\n".join(t for _,t,c in ocr if c > 0.5)
+            if len(txt) < 10:
+                continue
+            path = os.path.join(self.workdir, "images", f"p{page_no}_i{idx}.png")
             img.save(path)
-            ocr_result = self.reader.readtext(np.array(img))
-            ocr_text = "\r\n".join([text for _, text, conf in ocr_result if conf > 0.5]) if ocr_result else ""
-            prompt = f"以下圖片是一頁PDF文件的原始內容和擷取的文字如下:{ocr_text.strip()}，請以原始文字內容重構這段文字段落，還原其原文，勿加入多餘引言或評論"
+            prompt = f"第{page_no}頁 圖片OCR: {txt}\n請描述圖片內容。"
             summary = self.summarize_image(path, prompt)
-            log(f"第 {i} 頁文字 OCR+LLM 摘要完成：[ocr]{ocr_text.strip()}\r\n[llm]{summary}")
-            text_results.append({
-                "page": i,
-                "source": "ocr+llm",
-                "content": f"[ocr]{ocr_text.strip()}\r\n[llm]{summary}",
-                "media_type":"text"
-            })
+            images.append({'page': page_no, 'source': path, 'content': summary})
+
+    def extract_text(self, pdf, page_img, page_no, ocr_txt, texts):
+        # 決定是否使用 OCR 快取或純文字
+        if self.should_ocr(ocr_txt):
+            fb = os.path.join(self.workdir, 'ocr_fallback', f"p{page_no}.png")
+            page_img[page_no].save(fb)
+            prompt = f"重構第{page_no}頁文字: {ocr_txt}"
+            summary = self.summarize_image(fb, prompt)
         else:
-            log(f"第 {i} 頁純文字處理完成：{text}...")
-            text_results.append({
-                "page": i,
-                "source": "ori",
-                "content": text,
-                "media_type":"text"
-            })
-        return text_results
-    
-    def extract_imgs(self, doc, i, image_results):
-        # 處理圖片
-        fitz_page = doc.load_page(i - 1)
-        image_list = fitz_page.get_images(full=True)
-        if not image_list:
-            return image_results
-        print(f"📄 第 {i} 頁找到 {len(image_list)} 張圖片")
-
-        for img_index, img_info in enumerate(image_list):
-            xref = img_info[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            image_ext = base_image["ext"]
-
-            # 將圖片轉換為 PIL 圖像進行 OCR
-            img = Image.open(io.BytesIO(image_bytes))
-            img_array = np.array(img)
-            ocr_result = self.reader.readtext(img_array)
-            ocr_text = "\r\n".join([text for _, text, conf in ocr_result if conf > 0.5]) if ocr_result else ""
-            print(f"OCR 結果: {ocr_result}")
-
-            # 如果 OCR 結果長度小於 10 字，則丟棄圖片，跳過儲存
-            if len(ocr_text) < 10:
-                log(f"⚠️ 第 {i} 頁第 {img_index + 1} 張圖片 OCR 結果少於 8 字，已略過")
-                continue  # 跳過這張圖片，直接處理下一張
-
-            # 儲存圖片
-            img_name = f"page_{i}_img_{img_index + 1}.{image_ext}"
-            img_path = os.path.join(self.output_dir, "images", img_name)
-            with open(img_path, "wb") as f:
-                f.write(image_bytes)
-            print(f"圖片 {img_index + 1} 已儲存：{img_path}")
-
-            # 如果 OCR 結果長度符合條件，繼續處理圖片摘要
-            print(f"OCR 結果: {ocr_text}")
-            prompt = (
-                    "請描述這張圖片的內容。如果是文章請還原文章的所有文字內容，如果是表格要用和圖片中同樣的表格架構呈現文字內容以及相對應的欄位，並用markdown表格格式回傳結果"
-                    "請直接描述內容，不需要任何開場白、說明或引導句。"
-                    "僅提供純內容，不要加上:[好的]、[以下是分析]等字句"
-                    "若圖片為圖表，請指出:\r\n"
-                    "1.圖表類型(如折線圖、長條圖等)\r\n"
-                    "2.X軸和Y軸代表的意義\r\n"
-                    "3.每筆資料的數值和名稱\r\n"
-                    "4.資料呈現的趨勢、最高或最低點以及其關鍵變化\r\n"
-                    "若圖片非圖表，請改為描述其主要構成與重要資訊"
-                        )
-            summary = self.summarize_image(img_path, prompt)
-            log(f"🖼️ 第 {i} 頁圖片LLM解析完成：[llm]{summary[:80]}...")
-
-            image_results.append({
-                "page": i,
-                "source": img_path,
-                "content": summary,
-                "media_type":"image"
-            })
-
-        return image_results      
-
-    def save_result(self, result):
-        result_path = os.path.join(self.output_dir, "result.json")
-        with open(result_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        log(f"✅ 結果已儲存至 {result_path}")
+            summary = pdf.pages[page_no-1].extract_text() or ''
+        texts.append({'page': page_no, 'content': summary})
 
     def optimized_process(self):
-        start_time = time.time()
-        text_results, table_results, image_results = [], [], []
-        # 先判斷哪些頁需要渲染（表格／OCR／圖片）
+        start = time.time()
         pdf = pdfplumber.open(self.pdf_path)
-        doc = fitz.open(self.pdf_path)  # 用於 extract_imgs 中的 load_page
-        try:
-            table_pages = []
-            for i, page in enumerate(pdf.pages, start=1):
-                txt = page.extract_text() or ""
-                # 改為重用已開啟的 doc，避免重複開檔
-                has_tables = bool(page.extract_tables())
-                has_ocr    = self.should_ocr(txt)
-                img_list   = doc.load_page(i-1).get_images(full=True)
-                has_images = bool(img_list)
-                if has_tables or has_ocr or has_images:
-                    table_pages.append(i)
-                    
-            need_pages = sorted(set(table_pages))
-            log(f"🖼️ 需要渲染頁面: {need_pages}")
+        doc = fitz.open(self.pdf_path)
+        pages = list(range(1, len(pdf.pages) + 1))
 
-            # —— 2. 用 ProcessPoolExecutor 並行渲染 —— 
-            page_images = {}
-            # 為了讓 helper 接收參數，我們把需要的資料包成 tuple
-            args_list = [(self.pdf_path, i, set(table_pages)) for i in need_pages]
-            # max_workers 建議設成 CPU 核心數或自行調整
-            with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-                for i, img in executor.map(_render_page, args_list):
-                    page_images[i] = img
+        # 1. CPU-bound: 平行渲染與OCR
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+            pre = list(pool.map(lambda p: _render_and_ocr(self.pdf_path, p), pages))
+        page_img = {p: img for p, img, _ in pre}
+        ocr_txt  = {p: txt for p, _, txt in pre}
 
-                    
-            # 首先處理表格頁
-            table_blocks = []
-            rotated_pages = []
-            for i in table_pages:
-                log(f"📄 檢查第 {i} 頁表格位置...")
-                img = page_images[i]
-                page = pdf.pages[i - 1]
-                #先判斷是否需要轉向
-                ocr_result = self.reader.readtext(np.array(img))
-                angle = self.detect_rotation_angle_easyocr(ocr_result)
-                if angle == 90:
-                    img = img.rotate(-90, expand=True)
-                    page_images[i] = img
-                    ocr_result = self.reader.readtext(np.array(img))
-                    rotated_pages.append(i)
-                #先檢測表格座標
-                inputs = self.processor(images=img, return_tensors="pt").to(self.device)
-                with torch.no_grad():
-                    outputs = self.detector(**inputs)
-                target_sizes = torch.tensor([img.size[::-1]]).to(self.device)
-                results = self.processor.post_process_object_detection(outputs, threshold=0.3, target_sizes=target_sizes)[0]
-        
-                #頁面長寬
-                # 獲取頁面邊界資訊
-                #page_rect = page.rects[0]
-                page_width, page_height = img.size # 計算頁面寬度、高度 ＃page.width和height不一定等於圖片的像素尺寸
-                page_area = page_width * page_height
-                total_table_area = 0
-                for j, box in enumerate(results["boxes"]):
-                    # 計算表格佔頁面面積的比例
-                    total_table_area += self.calculate_table_area(box)
-                    table_blocks = self.extract_table(img,i,j,box,table_blocks)
-                table_area_ratio = total_table_area / page_area if page_area > 0 else 0.0
-                log(f"第 {i} 頁 表格佔頁面面積比例為：{table_area_ratio:.2f}")
-                # 如果表格佔比小於15%，進行文字和圖片提取
-                if table_area_ratio < 0.45:
-                    log(f"表格佔比小於45%，開始進行文字和圖片提取...")
-                    text_results = self.extract_texts(page, i, page_images, text_results)
-                    image_results = self.extract_imgs(doc, i, image_results)
-            
-            table_results = self.group_tables_summary(table_blocks,table_results)
+        # 2. GPU-bound: 表格偵測、摘要、文字/圖片提取
+        texts, tables, images = [], [], []
+        def gpu_task(item):
+            p, img, txt = item
+            # 表格偵測
+            inp = self.table_processor(images=img, return_tensors='pt').to(self.device)
+            with torch.no_grad(): out = self.table_detector(**inp)
+            sizes = torch.tensor([img.size[::-1]]).to(self.device)
+            res = self.table_processor.post_process_object_detection(out, threshold=0.3, target_sizes=sizes)[0]
+            # 提取所有表格
+            area = 0
+            for idx, box in enumerate(res['boxes']):
+                area += self.calculate_table_area(box)
+                self.extract_table(img, p, idx, box, tables)
+            # 文字提取
+            ratio = area / (img.width * img.height)
+            if ratio < 0.45:
+                self.extract_text(pdf, page_img, p, ocr_txt[p], texts)
+                self.extract_images(doc, p, images)
 
-            # 表格處理完成後，再處理沒有表格的頁面
-            for i, page in enumerate(pdf.pages, start=1):
-                if i in table_pages:
-                    continue  # 跳過表格頁
-                text_results = self.extract_texts(page,i,page_images,text_results)
-                # 處理圖片
-                image_results = self.extract_imgs(doc,i,image_results)
+        # 限制單線程 GPU 使用，避免記憶體瓶頸
+        with ThreadPoolExecutor(max_workers=1) as tpool:
+            list(tpool.map(gpu_task, pre))
 
-            result = text_results + table_results + image_results
-            self.save_result(result)
-        finally:
-            pdf.close()
-            doc.close()
+        result = texts + tables + images
+        # 3. 存檔
+        os.makedirs(self.workdir, exist_ok=True)
+        with open(os.path.join(self.workdir, 'result.json'), 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        log(f"✅ 完成，用時 {time.time()-start:.2f}s")
+        pdf.close(); doc.close()
+        return result
 
-        end_time = time.time()
-        log(f"✅ PDF 全部處理完成，用時 {end_time - start_time:.2f} 秒")
-
-        return result, rotated_pages
-
-
-if __name__ == "__main__":
-    processor = PdfProcessor("test.pdf")
-    result = processor.optimized_process()
+if __name__ == '__main__':
+    PdfProcessor('test.pdf').optimized_process()
