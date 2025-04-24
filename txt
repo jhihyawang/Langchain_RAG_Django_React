@@ -1,197 +1,45 @@
-import io
-import json
-import os
-import re
-import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from datetime import datetime
-
-import fitz  # PyMuPDF
-import numpy as np
-import pdfplumber
-import torch
-from easyocr import Reader
-from PIL import Image
-import ollama
-from transformers import AutoModelForObjectDetection, AutoProcessor
-
-
-def log(msg):
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}")
-
-# CPU 渲染+OCR 多進程函式
-def _render_and_ocr(pdf_path, page_no, dpi=100):
-    doc = fitz.open(pdf_path)
-    page = doc.load_page(page_no - 1)
-    pix = page.get_pixmap(dpi=dpi)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    doc.close()
-    # CPU-only OCR
-    reader = Reader(['ch_tra', 'en'], gpu=False)
-    ocr_res = reader.readtext(np.array(img))
-    text = "\n".join([t for _, t, _ in ocr_res if t.strip()])
-    return page_no, img, text
-
-class PdfProcessor:
-    def __init__(self, pdf_path, output_dir="media", model_name="gemma3:27b", cid_threshold=20):
-        self.pdf_path = pdf_path
-        basename = os.path.splitext(os.path.basename(pdf_path))[0]
-        self.workdir = os.path.join(output_dir, "extract_data", basename)
-        self.model_name = model_name
-        self.cid_threshold = cid_threshold
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # 初始化表格偵測模型與 OCR 工具
-        self.table_detector = AutoModelForObjectDetection.from_pretrained(
-            "microsoft/table-transformer-detection", revision="no_timm"
-        ).to(self.device)
-        self.table_processor = AutoProcessor.from_pretrained(
-            "microsoft/table-transformer-detection", revision="no_timm"
-        )
-        self.cpu_reader = Reader(['ch_tra', 'en'], gpu=False)
-
-        # 建立資料夾
-        for sub in ("images", "tables", "ocr_fallback"):
-            os.makedirs(os.path.join(self.workdir, sub), exist_ok=True)
-
-    def should_ocr(self, text: str) -> bool:
-        cid_count = len(re.findall(r'[\ue000-\uf8ff]', text)) + len(re.findall(r'\(cid:\d+\)', text))
-        return cid_count >= self.cid_threshold or len(text.strip()) < 50
-
-    def detect_rotation_angle_easyocr(self, img):
-        ocr_res = self.cpu_reader.readtext(np.array(img))
-        total = len(ocr_res)
-        if total == 0:
-            return 0
-        vertical, short_t, tall = 0, 0, 0
-        for box, text, _ in ocr_res:
-            x0, y0 = box[0]; x1, y1 = box[1]
-            angle = abs(np.degrees(np.arctan2(y1-y0, x1-x0)))
-            if 75 <= angle <= 105:
-                vertical += 1
-            if len(text.strip()) <= 1:
-                short_t += 1
-            w = np.linalg.norm(np.array(box[0]) - np.array(box[1]))
-            h = np.linalg.norm(np.array(box[0]) - np.array(box[3]))
-            if h > 2*w:
-                tall += 1
-        if total < 5:
-            return 0
-        if vertical/total > 0.5 or short_t/total > 0.4 or tall/total > 0.4:
-            return 90
-        return 0
-
-    def summarize_image(self, img_path, prompt: str) -> str:
-        log("LLM 圖像摘要中...")
-        system = (
-            "你是一位針對圖片影像和表格影像進行內容提取的助手，" 
-            "請以 markdown 格式回傳結果。"
-        )
-        try:
-            res = ollama.chat(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt, "images": [img_path]}
-                ]
+    def group_tables_summary(self, table_blocks, table_results):
+        # 分組連續同 header
+        groups = []
+        for block in sorted(table_blocks, key=lambda x: x['page']):
+            if groups and block['page'] == groups[-1][-1]['page'] + 1 and block['header'] == groups[-1][-1]['header']:
+                groups[-1].append(block)
+            else:
+                groups.append([block])
+        # 處理每組
+        for grp in groups:
+            # 合併圖
+            imgs = [Image.open(b['path']) for b in grp]
+            widths, heights = zip(*(i.size for i in imgs))
+            total_h = sum(heights) + 30 * len(imgs)
+            max_w = max(widths)
+            merged = Image.new('RGB', (max_w, total_h), 'white')
+            draw = ImageDraw.Draw(merged)
+            y = 0
+            font = ImageFont.load_default()
+            for b, im in zip(grp, imgs):
+                tag = f"=== Page {b['page']} ==="
+                draw.text((0, y), tag, fill='black', font=font)
+                y += 20
+                merged.paste(im, (0, y))
+                y += im.height + 10
+            merged_path = os.path.join(self.output_dir, f"merged_{grp[0]['page']}_{grp[-1]['page']}.png")
+            merged.save(merged_path)
+            # 提示並摘要
+            prompt = (
+                "以下圖片包含多頁連續表格，已用 '=== Page X ===' 標籤標註頁碼，"
+                "請針對每個區段以其標籤拆分並回傳對應 markdown 表格。"
             )
-            return res['message']['content']
-        except Exception as e:
-            return f"❌ LLM 錯誤: {e}"
-
-    def calculate_table_area(self, box) -> float:
-        x1, y1, x2, y2 = box
-        return abs((x2 - x1) * (y2 - y1))
-
-    def extract_table(self, img, page_no, idx, box, tables):
-        crop = img.crop(box.tolist())
-        path = os.path.join(self.workdir, "tables", f"p{page_no}_t{idx}.png")
-        crop.save(path)
-        # OCR header
-        ocr = self.cpu_reader.readtext(np.array(crop))
-        header = ''
-        if ocr:
-            top_y = min(b[0][1] for b,_,_ in ocr)
-            header = ' '.join(t for b,t,_ in ocr if abs(b[0][1] - top_y) < 5)
-        prompt = f"第{page_no}頁 表格標題: {header}\n請還原表格並以 markdown 格式呈現。"
-        summary = self.summarize_image(path, prompt)
-        tables.append({'page': page_no, 'source': path, 'content': summary, 'header': header})
-
-    def extract_images(self, doc, page_no, images):
-        fp = doc.load_page(page_no - 1)
-        for idx, img_info in enumerate(fp.get_images(full=True)):
-            data = doc.extract_image(img_info[0])
-            img = Image.open(io.BytesIO(data['image']))
-            ocr = self.cpu_reader.readtext(np.array(img))
-            txt = "\n".join(t for _,t,c in ocr if c > 0.5)
-            if len(txt) < 10:
-                continue
-            path = os.path.join(self.workdir, "images", f"p{page_no}_i{idx}.png")
-            img.save(path)
-            prompt = f"第{page_no}頁 圖片OCR: {txt}\n請描述圖片內容。"
-            summary = self.summarize_image(path, prompt)
-            images.append({'page': page_no, 'source': path, 'content': summary})
-
-    def extract_text(self, pdf, page_img, page_no, ocr_txt, texts):
-        # 決定是否使用 OCR 快取或純文字
-        if self.should_ocr(ocr_txt):
-            fb = os.path.join(self.workdir, 'ocr_fallback', f"p{page_no}.png")
-            page_img[page_no].save(fb)
-            prompt = f"重構第{page_no}頁文字: {ocr_txt}"
-            summary = self.summarize_image(fb, prompt)
-        else:
-            summary = pdf.pages[page_no-1].extract_text() or ''
-        texts.append({'page': page_no, 'content': summary})
-
-    def optimized_process(self):
-        start = time.time()
-        pdf = pdfplumber.open(self.pdf_path)
-        doc = fitz.open(self.pdf_path)
-        pages = list(range(1, len(pdf.pages) + 1))
-
-        # 1. CPU-bound: 平行渲染與OCR
-        f = partial(_render_and_ocr, self.pdf_path)
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-            pre = list(pool.map(lambda p: _render_and_ocr(self.pdf_path, p), pages))
-        page_img = {p: img for p, img, _ in pre}
-        ocr_txt  = {p: txt for p, _, txt in pre}
-
-        # 2. GPU-bound: 表格偵測、摘要、文字/圖片提取
-        texts, tables, images = [], [], []
-        def gpu_task(item):
-            p, img, txt = item
-            # 頁面旋轉偵測
-            angle = self.detect_rotation_angle_easyocr(img)
-            if angle == 90:
-                img = img.rotate(-90, expand=True)
-                rotated_pages.append(p)
-            # 表格偵測
-            inp = self.table_processor(images=img, return_tensors='pt').to(self.device)
-            with torch.no_grad(): out = self.table_detector(**inp)
-            sizes = torch.tensor([img.size[::-1]]).to(self.device)
-            res = self.table_processor.post_process_object_detection(out, threshold=0.3, target_sizes=sizes)[0]
-            # 提取所有表格
-            area = 0
-            for idx, box in enumerate(res['boxes']):
-                area += self.calculate_table_area(box)
-                self.extract_table(img, p, idx, box, tables)
-            # 文字提取
-            ratio = area / (img.width * img.height)
-            if ratio < 0.45:
-                self.extract_text(pdf, page_img, p, ocr_txt[p], texts)
-                self.extract_images(doc, p, images)
-
-        # 限制單線程 GPU 使用
-        with ThreadPoolExecutor(max_workers=1) as tpool:
-            list(tpool.map(gpu_task, pre))
-
-        result = texts + tables + images
-        os.makedirs(self.workdir, exist_ok=True)
-        with open(os.path.join(self.workdir, 'result.json'), 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        log(f"✅ 完成，用時 {time.time()-start:.2f}s 旋轉頁面: {rotated_pages}")
-        pdf.close(); doc.close()
-        return result, rotated_pages
-
-if __name__ == '__main__':
-    PdfProcessor('test.pdf').optimized_process()
+            resp = self.summarize_image(merged_path, prompt)
+            # 解析回傳
+            pattern = r"=== Page (\d+) ===\s*([\s\S]*?)(?=(?:=== Page \d+ ===)|$)"
+            for m in re.finditer(pattern, resp):
+                pg = int(m.group(1))
+                md = m.group(2).strip()
+                table_results.append({
+                    'page': pg,
+                    'source': next(b['path'] for b in grp if b['page']==pg),
+                    'content': md,
+                    'media_type': 'table'
+                })
+        return table_results
