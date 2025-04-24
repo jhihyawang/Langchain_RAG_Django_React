@@ -58,6 +58,29 @@ class PdfProcessor:
         cid_count = len(re.findall(r'[\ue000-\uf8ff]', text)) + len(re.findall(r'\(cid:\d+\)', text))
         return cid_count >= self.cid_threshold or len(text.strip()) < 50
 
+    def detect_rotation_angle_easyocr(self, img):
+        ocr_res = self.cpu_reader.readtext(np.array(img))
+        total = len(ocr_res)
+        if total == 0:
+            return 0
+        vertical, short_t, tall = 0, 0, 0
+        for box, text, _ in ocr_res:
+            x0, y0 = box[0]; x1, y1 = box[1]
+            angle = abs(np.degrees(np.arctan2(y1-y0, x1-x0)))
+            if 75 <= angle <= 105:
+                vertical += 1
+            if len(text.strip()) <= 1:
+                short_t += 1
+            w = np.linalg.norm(np.array(box[0]) - np.array(box[1]))
+            h = np.linalg.norm(np.array(box[0]) - np.array(box[3]))
+            if h > 2*w:
+                tall += 1
+        if total < 5:
+            return 0
+        if vertical/total > 0.5 or short_t/total > 0.4 or tall/total > 0.4:
+            return 90
+        return 0
+
     def summarize_image(self, img_path, prompt: str) -> str:
         log("LLM 圖像摘要中...")
         system = (
@@ -136,6 +159,11 @@ class PdfProcessor:
         texts, tables, images = [], [], []
         def gpu_task(item):
             p, img, txt = item
+            # 頁面旋轉偵測
+            angle = self.detect_rotation_angle_easyocr(img)
+            if angle == 90:
+                img = img.rotate(-90, expand=True)
+                rotated_pages.append(p)
             # 表格偵測
             inp = self.table_processor(images=img, return_tensors='pt').to(self.device)
             with torch.no_grad(): out = self.table_detector(**inp)
