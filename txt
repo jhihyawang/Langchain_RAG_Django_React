@@ -1,45 +1,112 @@
-    def group_tables_summary(self, table_blocks, table_results):
-        # 分組連續同 header
-        groups = []
-        for block in sorted(table_blocks, key=lambda x: x['page']):
-            if groups and block['page'] == groups[-1][-1]['page'] + 1 and block['header'] == groups[-1][-1]['header']:
-                groups[-1].append(block)
-            else:
-                groups.append([block])
-        # 處理每組
-        for grp in groups:
-            # 合併圖
-            imgs = [Image.open(b['path']) for b in grp]
-            widths, heights = zip(*(i.size for i in imgs))
-            total_h = sum(heights) + 30 * len(imgs)
-            max_w = max(widths)
-            merged = Image.new('RGB', (max_w, total_h), 'white')
-            draw = ImageDraw.Draw(merged)
-            y = 0
-            font = ImageFont.load_default()
-            for b, im in zip(grp, imgs):
-                tag = f"=== Page {b['page']} ==="
-                draw.text((0, y), tag, fill='black', font=font)
-                y += 20
-                merged.paste(im, (0, y))
-                y += im.height + 10
-            merged_path = os.path.join(self.output_dir, f"merged_{grp[0]['page']}_{grp[-1]['page']}.png")
-            merged.save(merged_path)
-            # 提示並摘要
-            prompt = (
-                "以下圖片包含多頁連續表格，已用 '=== Page X ===' 標籤標註頁碼，"
-                "請針對每個區段以其標籤拆分並回傳對應 markdown 表格。"
+import json
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+
+class VectorStoreHandler:
+    def __init__(self, db_path="chroma_user_db", embed_model="BAAI/bge-m3"):
+        self.embedder = HuggingFaceEmbeddings(model_name=embed_model)
+        self.vectorstore = Chroma(persist_directory=db_path, embedding_function=self.embedder)
+        self.splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
+
+    def add(self, content: str, media_type: str, page: int, document_id: str, source: str, title: str) -> bool:
+        if not content.strip():
+            return False
+        chunks = self.splitter.split_text(content)
+        metadatas = [
+            {
+                "media_type": media_type,
+                "page_number": page,
+                "document_id": document_id,
+                "source": source,
+                "title": title,
+                "chunk_index": i,
+            }
+            for i in range(len(chunks))
+        ]
+        self.vectorstore.add_texts(chunks, metadatas=metadatas)
+        print(f"✅ 向量已儲存：{media_type} 第 {page} 頁，共 {len(chunks)} 段")
+        return True
+
+    def list(self, document_id: str) -> list:
+        try:
+            res = self.vectorstore._collection.get(
+                where={"document_id": document_id},
+                include=["ids", "documents", "metadatas"]
             )
-            resp = self.summarize_image(merged_path, prompt)
-            # 解析回傳
-            pattern = r"=== Page (\d+) ===\s*([\s\S]*?)(?=(?:=== Page \d+ ===)|$)"
-            for m in re.finditer(pattern, resp):
-                pg = int(m.group(1))
-                md = m.group(2).strip()
-                table_results.append({
-                    'page': pg,
-                    'source': next(b['path'] for b in grp if b['page']==pg),
-                    'content': md,
-                    'media_type': 'table'
-                })
-        return table_results
+            return [
+                {
+                    "id": res["ids"][i],
+                    "content": res["documents"][i],
+                    "chunk_index": res["metadatas"][i].get("chunk_index", i),
+                    "page_number": res["metadatas"][i].get("page_number"),
+                    "media_type": res["metadatas"][i].get("media_type"),
+                    "source": res["metadatas"][i].get("source"),
+                    "title": res["metadatas"][i].get("title"),
+                }
+                for i in range(len(res["documents"]))
+            ]
+        except Exception as e:
+            print(f"❌ 查詢失敗: {e}")
+            return []
+
+    def delete(self, document_id: str) -> bool:
+        try:
+            self.vectorstore._collection.delete(where={"document_id": document_id})
+            print(f"🗑 已刪除 document_id={document_id} 的向量資料")
+            return True
+        except Exception as e:
+            print(f"❌ 刪除失敗: {e}")
+            return False
+
+    def update(self, chunk_id: str, new_content: str) -> str:
+        """
+        更新指定 chunk 的文本內容，保留原 chunk_id。
+        利用 ChromaDB 原生 update，避免重新刪除與新增。
+        返回更新後的 chunk_id，失敗時返回 None。
+        """
+        try:
+            # 直接更新 document 欄位
+            self.vectorstore._collection.update(
+                ids=[chunk_id],
+                documents=[new_content]
+            )
+            print(f"🔄 已更新 chunk_id={chunk_id}")
+            return chunk_id
+        except Exception as e:
+            print(f"❌ 更新失敗: {e}")
+            return None
+
+    def delete_chunk_by_id(self, chunk_id: str) -> bool:
+        try:
+            self.vectorstore._collection.delete(ids=[chunk_id])
+            print(f"🗑 已刪除 chunk_id={chunk_id} 的向量資料")
+            return True
+        except Exception as e:
+            print(f"❌ 刪除 chunk 失敗: {e}")
+            return False
+
+    def get_chunks_by_document_id(self, document_id: str) -> list:
+        try:
+            res = self.vectorstore._collection.get(
+                where={"document_id": document_id},
+                include=["ids", "documents", "metadatas"]
+            )
+            return [
+                {"id": res["ids"][i], **res["metadatas"][i], "content": res["documents"][i]}
+                for i in range(len(res["documents"]))
+            ]
+        except Exception as e:
+            print(f"❌ 查詢 chunk 發生錯誤: {e}")
+            return []
+
+    def get_chunk_metadata_by_id(self, chunk_id: str) -> dict:
+        try:
+            res = self.vectorstore._collection.get(
+                ids=[chunk_id],
+                include=["metadatas"]
+            )
+            return res.get("metadatas", [{}])[0]
+        except Exception as e:
+            print(f"❌ 查詢 chunk metadata 失敗: {e}")
+            return {}
