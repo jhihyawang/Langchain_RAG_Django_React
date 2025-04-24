@@ -150,6 +150,7 @@ class PdfProcessor:
         pages = list(range(1, len(pdf.pages) + 1))
 
         # 1. CPU-bound: 平行渲染與OCR
+        f = partial(_render_and_ocr, self.pdf_path)
         with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
             pre = list(pool.map(lambda p: _render_and_ocr(self.pdf_path, p), pages))
         page_img = {p: img for p, img, _ in pre}
@@ -180,18 +181,17 @@ class PdfProcessor:
                 self.extract_text(pdf, page_img, p, ocr_txt[p], texts)
                 self.extract_images(doc, p, images)
 
-        # 限制單線程 GPU 使用，避免記憶體瓶頸
+        # 限制單線程 GPU 使用
         with ThreadPoolExecutor(max_workers=1) as tpool:
             list(tpool.map(gpu_task, pre))
 
         result = texts + tables + images
-        # 3. 存檔
         os.makedirs(self.workdir, exist_ok=True)
         with open(os.path.join(self.workdir, 'result.json'), 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
-        log(f"✅ 完成，用時 {time.time()-start:.2f}s")
+        log(f"✅ 完成，用時 {time.time()-start:.2f}s 旋轉頁面: {rotated_pages}")
         pdf.close(); doc.close()
-        return result
+        return result, rotated_pages
 
 if __name__ == '__main__':
     PdfProcessor('test.pdf').optimized_process()
