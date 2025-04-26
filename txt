@@ -1,24 +1,2 @@
-        # 建 retriever
-        retriever = vectorstore.vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 20},
-        )
-        try:
-            # 嘗試用原本的 invoke
-            documents = retriever.invoke(query)
-        except ValidationError as e:
-            # 如果遇到 page_content 不是字串的錯，就做個「安全版」fallback
-            raw = vectorstore.vectorstore._collection.get(
-                where={"document_id": knowledge_id},
-                include=["documents", "metadatas", "ids"],
-            )
-            documents = []
-            for doc_content, meta, _id in zip(raw["documents"], raw["metadatas"], raw["ids"]):
-                # 保證一定是 str
-                if not isinstance(doc_content, str):
-                    doc_content = doc_content or ""
-                documents.append(Document(
-                    page_content=doc_content,
-                    metadata=meta or {},
-                    id=_id,
-                ))
+from pydantic import ValidationError
+from langchain_core.documents import Document
