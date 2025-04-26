@@ -1,38 +1,24 @@
-def add(self, content, media_type, page, document_id, title, source):
-    if not content or not content.strip():
-        return False
-    # 拆段
-    chunks = self.splitter.split_text(content)
-    # 先把 metadatas 做好
-    metadatas = [
-        {
-            "media_type": media_type,
-            "page_number": page,
-            "document_id": document_id,
-            "source": source,
-            "chunk_index": i,
-            "title": title
-        }
-        for i in range(len(chunks))
-    ]
-
-    # 過濾＆轉成 str
-    valid_chunks = []
-    valid_metas  = []
-    for chunk, meta in zip(chunks, metadatas):
-        if chunk is None:
-            continue
-        # 強制轉成字串，並去掉開頭結尾空白
-        chunk = str(chunk).strip()
-        if not chunk:
-            continue
-        valid_chunks.append(chunk)
-        valid_metas.append(meta)
-
-    if not valid_chunks:
-        return False
-
-    # 最後把乾淨的 chunks 丟進去
-    self.vectorstore.add_texts(valid_chunks, metadatas=valid_metas)
-    print(f"✅ 向量已儲存：[{media_type}] 第 {page} 頁，共 {len(valid_chunks)} 段")
-    return True
+        # 建 retriever
+        retriever = vectorstore.vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 5, "fetch_k": 20},
+        )
+        try:
+            # 嘗試用原本的 invoke
+            documents = retriever.invoke(query)
+        except ValidationError as e:
+            # 如果遇到 page_content 不是字串的錯，就做個「安全版」fallback
+            raw = vectorstore.vectorstore._collection.get(
+                where={"document_id": knowledge_id},
+                include=["documents", "metadatas", "ids"],
+            )
+            documents = []
+            for doc_content, meta, _id in zip(raw["documents"], raw["metadatas"], raw["ids"]):
+                # 保證一定是 str
+                if not isinstance(doc_content, str):
+                    doc_content = doc_content or ""
+                documents.append(Document(
+                    page_content=doc_content,
+                    metadata=meta or {},
+                    id=_id,
+                ))
