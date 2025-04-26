@@ -1,15 +1,38 @@
-         if use_retrieval:
--            retriever = vectorstore.vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 5, "fetch_k": 20})
--            documents = retriever.invoke(query)
-+            retriever = vectorstore.vectorstore.as_retriever(
-+                search_type="mmr", search_kwargs={"k": 5, "fetch_k": 20}
-+            )
-+            # 呼叫檢索；失敗時 fallback 空 list
-+            try:
-+                documents = retriever.invoke(query)
-+            except Exception as e:
-+                print(f"⚠️ 檢索時發生例外，跳過檢索：{e}")
-+                documents = []
-+
-+            # 把 page_content=None 的條目先濾掉
-+            documents = [doc for doc in documents if isinstance(doc.page_content, str)]
+def add(self, content, media_type, page, document_id, title, source):
+    if not content or not content.strip():
+        return False
+    # 拆段
+    chunks = self.splitter.split_text(content)
+    # 先把 metadatas 做好
+    metadatas = [
+        {
+            "media_type": media_type,
+            "page_number": page,
+            "document_id": document_id,
+            "source": source,
+            "chunk_index": i,
+            "title": title
+        }
+        for i in range(len(chunks))
+    ]
+
+    # 過濾＆轉成 str
+    valid_chunks = []
+    valid_metas  = []
+    for chunk, meta in zip(chunks, metadatas):
+        if chunk is None:
+            continue
+        # 強制轉成字串，並去掉開頭結尾空白
+        chunk = str(chunk).strip()
+        if not chunk:
+            continue
+        valid_chunks.append(chunk)
+        valid_metas.append(meta)
+
+    if not valid_chunks:
+        return False
+
+    # 最後把乾淨的 chunks 丟進去
+    self.vectorstore.add_texts(valid_chunks, metadatas=valid_metas)
+    print(f"✅ 向量已儲存：[{media_type}] 第 {page} 頁，共 {len(valid_chunks)} 段")
+    return True
