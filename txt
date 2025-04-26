@@ -1,2 +1,4 @@
-from pydantic import ValidationError
-from langchain_core.documents import Document
+    if not isinstance(content, str):
+        content = str(content) if content is not None else ""
+    if not content.strip():
+        return False
