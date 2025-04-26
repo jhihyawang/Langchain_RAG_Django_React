@@ -1,5 +1,15 @@
-import torch
-print("GPU 可用: ", torch.cuda.is_available())
-print("GPU 數量: ", torch.cuda.device_count())
-print("當前設備: ", torch.cuda.current_device())
-print("設備名稱: ", torch.cuda.get_device_name(0))
+         if use_retrieval:
+-            retriever = vectorstore.vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 5, "fetch_k": 20})
+-            documents = retriever.invoke(query)
++            retriever = vectorstore.vectorstore.as_retriever(
++                search_type="mmr", search_kwargs={"k": 5, "fetch_k": 20}
++            )
++            # 呼叫檢索；失敗時 fallback 空 list
++            try:
++                documents = retriever.invoke(query)
++            except Exception as e:
++                print(f"⚠️ 檢索時發生例外，跳過檢索：{e}")
++                documents = []
++
++            # 把 page_content=None 的條目先濾掉
++            documents = [doc for doc in documents if isinstance(doc.page_content, str)]
