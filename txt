@@ -324,16 +324,16 @@ class PdfProcessor:
                 rotated_pages += page_rot
                 all_results += page_results
 
-                # 寫向量庫
-                for item in page_results:
-                    self.vectorstore.add(
-                        content=item["content"],
-                        page=item["page"],
-                        document_id=self.knowledge_id,
-                        media_type=item["media_type"],
-                        title=self.knowledge_title,
-                        source=item["source"]
-                    )
+                # # 寫向量庫
+                # for item in page_results:
+                #     self.vectorstore.add(
+                #         content=item["content"],
+                #         page=item["page"],
+                #         document_id=self.knowledge_id,
+                #         media_type=item["media_type"],
+                #         title=self.knowledge_title,
+                #         source=item["source"]
+                #     )
 
                 # 更新 result.json
                 with open(result_path, "r+", encoding="utf-8") as f:
