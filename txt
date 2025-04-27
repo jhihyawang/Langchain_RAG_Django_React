@@ -1,12 +1,16 @@
+col_texts = []
 for ci in range(len(col_xs) - 1):
     cx1, cx2 = int(col_xs[ci]), int(col_xs[ci + 1])
-    # 先 clamp 到 0 ~ W
-    cx1 = max(0, cx1)
-    cx2 = min(tbl_crop.width, cx2)
-
-    # 寬度不足就跳過，避免空 ROI
+    cx1 = max(0, cx1);  cx2 = min(tbl_crop.width, cx2)
     if cx2 - cx1 < 2:
-        col_texts.append("")             # 保留一欄空字串
+        col_texts.append("")       # 保留空欄
         continue
 
-    col_img = tbl_crop.crop((cx1, 0, cx2, tbl_crop.height))
+    col_img = tbl_crop.crop((cx1 + 1, 0, cx2 - 1, tbl_crop.height))
+    txt = "".join(self.reader.readtext(np.array(col_img), detail=0)).strip()
+    col_texts.append(txt)
+
+# -------------------------------------------- 原始
+# content  = "/".join(txt)
+# -------------------------------------------- 修正版
+content = "/".join(col_texts)     # 把「每一欄」的文字用 / 串起來
