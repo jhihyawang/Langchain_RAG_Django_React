@@ -1,258 +1,66 @@
-import React, { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import API_BASE_URL from "../api";
+import numpy as np
 
-const KnowledgeEditPage = () => {
-  const { id } = useParams();
-  const navigate = useNavigate();
-  const [title, setTitle] = useState("");
-  const [pageGroups, setPageGroups] = useState([]);
-  const [modifiedChunks, setModifiedChunks] = useState(new Set());
-  const [editModeMap, setEditModeMap] = useState({});
-  const [searchText, setSearchText] = useState("");
+def extract_tables(self, img, i, j, box):
+    import json, os
+    coords = box.tolist()  # [x1, y1, x2, y2]
+    expand_coords = [coords[0]-50, coords[1]-40, coords[2]+50, coords[3]+50]
+    cropped = img.crop(expand_coords)
+    path = os.path.join(self.output_dir, "tables", f"page{i}_table{j+1}.png")
+    cropped.save(path)
 
-  useEffect(() => {
-    fetch(`${API_BASE_URL}/api/knowledge/${id}/chunks/`)
-      .then((res) => res.json())
-      .then((data) => {
-        setTitle((data.title || "").replace(/\.pdf$/i, ""));
-        const grouped = groupChunks(data.chunks || []);
-        setPageGroups(grouped);
-      })
-      .catch((err) => console.error("❌ 載入 chunks 失敗", err));
-  }, [id]);
+    # 1. 執行 EasyOCR
+    ocr = self.reader.readtext(np.array(cropped))
+    # 2. 整理結果：只取高置信度
+    ocr_boxes = []
+    for (box, text, conf) in ocr:
+        if conf > 0.5 and text.strip():
+            xs = [pt[0] for pt in box]
+            ys = [pt[1] for pt in box]
+            x1, y1 = int(min(xs)), int(min(ys))
+            x2, y2 = int(max(xs)), int(max(ys))
+            ocr_boxes.append([x1, y1, x2, y2, text.strip()])
 
-  const groupChunks = (chunks) => {
-    const pages = {};
-    for (const chunk of chunks) {
-      const pageKey = chunk.page_number;
-      if (!pages[pageKey]) pages[pageKey] = { page_number: pageKey, groups: [] };
-      const sourceKey = Array.isArray(chunk.source)
-        ? chunk.source[0]
-        : typeof chunk.source === "string"
-        ? chunk.source
-        : `text-${chunk.id}`;
-      const subGroupKey = `${chunk.media_type}-${sourceKey}`;
-      let subGroup = pages[pageKey].groups.find((g) => g.key === subGroupKey);
-      if (!subGroup) {
-        subGroup = {
-          key: subGroupKey,
-          media_type: chunk.media_type,
-          source: sourceKey,
-          chunks: [],
-        };
-        pages[pageKey].groups.push(subGroup);
-      }
-      subGroup.chunks.push(chunk);
+    # 3. 依 y1 先分群，再群內依 x1 排序
+    # (依據最左側 anchor row 分行)
+    min_x = min(b[0] for b in ocr_boxes) if ocr_boxes else 0
+    x_tol = 15
+    anchor_boxes = [b for b in ocr_boxes if abs(b[0] - min_x) < x_tol]
+    anchor_ys = sorted((b[1] + b[3]) // 2 for b in anchor_boxes)
+    def assign_row(y, anchors):
+        anchors = np.array(anchors)
+        return int(np.argmin(np.abs(anchors - y)))
+    row_groups = [[] for _ in anchor_ys] if anchor_ys else []
+    for b in ocr_boxes:
+        cy = (b[1] + b[3]) // 2
+        row_idx = assign_row(cy, anchor_ys)
+        row_groups[row_idx].append(b)
+    # 行內左到右排序
+    rows_sorted = [sorted(row, key=lambda b: b[0]) for row in row_groups]
+    # 4. 合成有序文字（以 \t 分隔欄，\n 分隔行）
+    merged = "\n".join(
+        "\t".join(b[4] for b in row) for row in rows_sorted if row
+    )
+
+    # 5. 組 prompt 給 LLM
+    prompt = (
+        f"以下圖片是一張表格，OCR 分行內容如下：\n{merged}\n"
+        "請根據圖片與文字內容還原原始表格，並回傳 markdown 格式的表格，"
+        "如遇到複合欄位請合併處理，標題結構可參考提供文字，勿遺漏資料。"
+    )
+    summary = self.summarize_image(path, prompt)
+
+    table_result = {
+        "page": i,
+        "image": path,
+        "content": summary,
+        "media_type": "table"
     }
-    return Object.values(pages);
-  };
-
-  const handleChunkEdit = (chunkId, newContent) => {
-    setPageGroups((prev) =>
-      prev.map((page) => ({
-        ...page,
-        groups: page.groups.map((group) => ({
-          ...group,
-          chunks: group.chunks.map((chunk) =>
-            chunk.id === chunkId ? { ...chunk, content: newContent } : chunk
-          ),
-        })),
-      }))
-    );
-  };
-
-  const handleDeleteChunk = async (chunkId) => {
-    if (!window.confirm("確定要刪除此區塊嗎？")) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/knowledge/chunk/${chunkId}/`, {
-        method: "DELETE",
-      });
-      if (res.status === 204) {
-        setPageGroups((prev) =>
-          prev
-            .map((page) => ({
-              ...page,
-              groups: page.groups
-                .map((group) => ({
-                  ...group,
-                  chunks: group.chunks.filter((chunk) => chunk.id !== chunkId),
-                }))
-                .filter((group) => group.chunks.length > 0),
-            }))
-            .filter((page) => page.groups.length > 0)
-        );
-      } else {
-        alert("❌ 刪除失敗");
-      }
-    } catch (err) {
-      console.error("❌ 刪除 chunk 失敗", err);
-    }
-  };
-
-  const handleSaveAll = async () => {
-    try {
-      for (const page of pageGroups) {
-        for (const group of page.groups) {
-          for (const chunk of group.chunks) {
-            await fetch(`${API_BASE_URL}/api/knowledge/chunk/${chunk.id}/`, {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ content: chunk.content }),
-            });
-          }
-        }
-      }
-      alert("✅ 所有區塊已成功更新！");
-      navigate("/document");
-    } catch (err) {
-      console.error("❌ 儲存失敗", err);
-      alert("❌ 儲存失敗");
-    }
-  };
-
-  const toggleEditMode = (chunkId) => {
-    setEditModeMap((prev) => ({
-      ...prev,
-      [chunkId]: !prev[chunkId],
-    }));
-  };
-
-  const mediaTypeLabel = {
-    text: "文字群組",
-    table: "表格群組",
-    image: "圖片群組",
-  };
-
-  const mediaTypeBadgeClass = {
-    text: "badge bg-secondary",
-    table: "badge bg-success",
-    image: "badge bg-info",
-  };
-
-  return (
-    <div className="container mt-4">
-      <h3>📝 編輯文件內容（ID: {id}）</h3>
-      <p>檔案名稱：{title}</p>
-      <input
-        type="text"
-        className="form-control mb-3"
-        placeholder="🔍 搜尋 chunk 內容關鍵字..."
-        value={searchText}
-        onChange={(e) => setSearchText(e.target.value)}
-      />
-      {pageGroups.map((page) => {
-        // 篩選每頁的 group.chunks，判斷是否有內容包含關鍵字
-        const filteredGroups = page.groups
-          .map((group) => {
-            const filteredChunks = group.chunks.filter((chunk) =>
-              chunk.content.toLowerCase().includes(searchText.toLowerCase())
-            );
-            return filteredChunks.length > 0
-              ? { ...group, chunks: filteredChunks }
-              : null;
-          })
-          .filter((g) => g !== null);
-
-        if (filteredGroups.length === 0) return null;
-
-        return (
-          <div key={page.page_number} className="mb-4 border rounded p-3 bg-light">
-            <h5>📄 頁碼：{page.page_number}</h5>
-
-            {filteredGroups.map((group, gIdx) => (
-              <div key={`${page.page_number}-${gIdx}`} className="mb-4">
-                <h6 className="mb-2">
-                  <span className={mediaTypeBadgeClass[group.media_type] || "badge bg-dark"}>
-                    {mediaTypeLabel[group.media_type] || "未知群組"}
-                  </span>
-                </h6>
-
-                {group.media_type !== "text" && group.source && (
-                  <div className="mb-2 text-center">
-                    <img
-                      src={`${API_BASE_URL}/${group.source}`}
-                      alt={`group-${gIdx}`}
-                      style={{
-                        maxWidth: "100%",
-                        maxHeight: "300px",
-                        border: "1px solid #ccc",
-                      }}
-                    />
-                  </div>
-                )}
-
-                {group.chunks.map((chunk) => (
-                  <div className="card my-2" key={chunk.id}>
-                    <div className="card-header d-flex justify-content-between align-items-center">
-                      <span>
-                        🧩 Chunk #{chunk.chunk_index}
-                        {modifiedChunks.has(chunk.id) && (
-                          <span className="text-warning ms-2">🟡 已修改</span>
-                        )}
-                      </span>
-                      <div>
-                        <button
-                          className="btn btn-sm btn-secondary me-2"
-                          onClick={() => toggleEditMode(chunk.id)}
-                        >
-                          {editModeMap[chunk.id] ? "預覽" : "編輯"}
-                        </button>
-                        <button
-                          className="btn btn-sm btn-danger"
-                          onClick={() => handleDeleteChunk(chunk.id)}
-                        >
-                          🗑️ 刪除
-                        </button>
-                      </div>
-                    </div>
-                    <div className="card-body">
-                      {editModeMap[chunk.id] ? (
-                        <textarea
-                          className="form-control mb-2"
-                          rows="5"
-                          value={chunk.content}
-                          onChange={(e) => {
-                            handleChunkEdit(chunk.id, e.target.value);
-                            setModifiedChunks((prev) => {
-                              const next = new Set(prev);
-                              next.add(chunk.id);
-                              return next;
-                            });
-                          }}
-                        ></textarea>
-                      ) : (
-                        <div
-                          className="prose max-w-full"
-                          style={{
-                            background: "#f8f9fa",
-                            padding: "8px",
-                            borderRadius: "6px",
-                            minHeight: "2.5em",
-                          }}
-                        >
-                          <ReactMarkdown children={chunk.content} remarkPlugins={[remarkGfm]} />
-                        </div>
-                      )}
-                      <div className="text-muted small mt-2">
-                        🔗 來源：<code>{group.source}</code>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        );
-      })}
-
-      <button className="btn btn-success w-100 mt-4" onClick={handleSaveAll}>
-        💾 儲存所有變更
-      </button>
-    </div>
-  );
-};
-
-export default KnowledgeEditPage;
+    self.vectorstore.add(
+        content=summary,
+        page=i,
+        document_id=self.knowledge_id,
+        media_type="table",
+        title=self.knowledge_title,
+        source=path
+    )
+    return table_result
