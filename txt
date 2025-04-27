@@ -1,35 +1,63 @@
-# ——— 第二輪：若表格佔比低，再嘗試對「剩餘部分」做表格偵測 ———
-if table_ratio < 0.50:
-    log(f"第 {i} 頁表格佔比 < 50 %，嘗試對剩餘區域再做一次表格偵測")
+# ================== extract_tables 補強 ==================
+from PIL import ImageDraw   # 檔頭已 import 可略去
 
-    # ➊ 用 mask 把偵測到的表格區域塗黑
-    mask = Image.new("L", img.size, 0)               # 黑 = 0
-    draw = ImageDraw.Draw(mask)
-    for b in det["boxes"]:
-        x1,y1,x2,y2 = map(int, b.tolist())
-        draw.rectangle([x1,y1,x2,y2], fill=255)      # 表格區域塗白(255)
+def extract_tables(self, img, page_num, tbl_idx, box):
+    try:
+        x1, y1, x2, y2 = map(int, box.tolist())
+        # ⚑ 1. 保障座標不離譜
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(img.width-1, x2), min(img.height-1, y2)
+        if x2 - x1 < 3 or y2 - y1 < 3:          # 太小就跳過
+            log(f"⚠️ Page {page_num} table {tbl_idx}: box too small, skip")
+            return None
 
-    # ➋ 取“非表格”部分 (反相 + alpha) 形成副圖片
-    inverted = ImageChops.invert(mask)
-    bg = Image.new("RGB", img.size, (255,255,255))
-    remainder = Image.composite(img, bg, inverted)   # 只有剩餘內容
+        tbl_crop = img.crop((x1, y1, x2, y2))
+        save_path = os.path.join(
+            self.output_dir, "tables", f"page{page_num}_table{tbl_idx+1}.png"
+        )
+        tbl_crop.save(save_path)
 
-    # ➌ 對 remainder 再跑 table-transformer
-    rem_inputs  = self.processor(images=remainder, return_tensors="pt").to(self.detect_device)
-    with torch.no_grad():
-        rem_out = self.detector(**rem_inputs)
-    rem_det = self.processor.post_process_object_detection(
-        rem_out, threshold=0.5, target_sizes=torch.tensor([img.size[::-1]]).to(self.detect_device)
-    )[0]
+        # ↓ 以下流程照舊 … (若偵測不到 column 時的 fallback 也一樣)
 
-    if len(rem_det["boxes"]):                 # ➜ 副檢測確實還有表格
-        log(f"⚡ 副檢測額外找到 {len(rem_det['boxes'])} 個小表格")
-        for ridx, rbox in enumerate(rem_det["boxes"]):
-            tbl = self.extract_tables(remainder, i, f"{idx+1}-{ridx+1}", rbox)
-            page_results.append(tbl)
-    else:
-        log("副檢測未再找到表格 → 直接提取文字與圖片")
-        txt  = self.extract_texts(page, i, img)
-        page_results.append(txt)
-        page_results.extend(self.extract_imgs(doc, i))
-##################################################################
+        # …產生 content 變數 …
+
+        # ⚑ 2. 在回傳／寫向量庫前把 None → ""
+        return {
+            "page": page_num,
+            "image": save_path,
+            "content": content,
+            "media_type": "table",
+            "source": save_path                    # 確保不是 None
+        }
+
+    except Exception as e:
+        log(f"❌ Page {page_num} table {tbl_idx} error: {e}")
+        return {
+            "page": page_num,
+            "image": None,
+            "content": f"extract error: {e}",
+            "media_type": "table",
+            "source": ""
+        }
+
+
+# ================== VectorStoreHandler.add() 補強 ==================
+def add(self, content, media_type, page, document_id, title, source):
+    if not isinstance(content, str):
+        content = str(content) if content is not None else ""
+    if not content.strip():
+        return False
+
+    # ⚑ 3. 將可能為 None 的欄位轉成 ""
+    safe = lambda v: "" if v is None else v
+    metadatas = [
+        {
+            "media_type": safe(media_type),
+            "page_number": page,
+            "document_id": document_id,
+            "source": safe(source),
+            "chunk_index": i,
+            "title": safe(title)
+        } for i in range(len(chunks))
+    ]
+    ...
