@@ -1,32 +1,7 @@
-ocr_boxes = []
-for (box, text, conf) in ocr:
-    if conf > 0.5 and text.strip():
-        xs = [pt[0] for pt in box]
-        ys = [pt[1] for pt in box]
-        x1, y1 = int(min(xs)), int(min(ys))
-        x2, y2 = int(max(xs)), int(max(ys))
-        ocr_boxes.append([x1, y1, x2, y2, text.strip()])
-
-if not ocr_boxes:
-    return ""  # 或其他預設處理
-
-# 3. 根據 y 軸最小，判定最上排的位置
-min_y = min(b[1] for b in ocr_boxes)
-y_tol = 18  # 可根據字體大小微調
-# 找出最上排的所有格子
-first_row = [b for b in ocr_boxes if abs(b[1] - min_y) < y_tol]
-
-# 4. 行內依 x1 由左到右排序
-first_row_sorted = sorted(first_row, key=lambda b: b[0])
-
-# 5. 只留標頭文字（list of str）
-table_headers = [b[4] for b in first_row_sorted]
-
-# 6. 如果要變成 Markdown 標頭格式
-md_header = "| " + " | ".join(table_headers) + " |"
-md_sep = "| " + " | ".join(["---"] * len(table_headers)) + " |"
-print(md_header)
-print(md_sep)
-
-# 如果你要存到變數或回傳
-markdown_table_header = md_header + "\n" + md_sep
+# 這裡將 title, page_number 都加到每段 content 前面
+context = "\n\n".join(
+    [
+        f"【文件：{doc['title']}｜頁碼：{doc['page_number']}】\n{doc['content']}"
+        for doc in retrieved_docs
+    ]
+)
