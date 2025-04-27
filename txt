@@ -1,7 +1,12 @@
-# 若 x2、y2 剛好等於邊界，容易造成寬/高=0，再保證各 >0
-if x2 - x1 < 2 or y2 - y1 < 2:           # 2 px 為下限，可依需求調
-    return {"page": page_num,
-            "media_type": "table",
-            "source": None,
-            "content": "❌ 表格範圍異常，已跳過"}      # 直接略過這張表
-tbl_crop = img.crop((x1, y1, x2, y2))
+for ci in range(len(col_xs) - 1):
+    cx1, cx2 = int(col_xs[ci]), int(col_xs[ci + 1])
+    # 先 clamp 到 0 ~ W
+    cx1 = max(0, cx1)
+    cx2 = min(tbl_crop.width, cx2)
+
+    # 寬度不足就跳過，避免空 ROI
+    if cx2 - cx1 < 2:
+        col_texts.append("")             # 保留一欄空字串
+        continue
+
+    col_img = tbl_crop.crop((cx1, 0, cx2, tbl_crop.height))
