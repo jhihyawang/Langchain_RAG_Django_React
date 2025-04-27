@@ -1,40 +1,7 @@
-import pandas as pd
-from PIL import Image, ImageDraw, ImageFont
-
-csv_path = "table_output/table_cells.csv"
-df = pd.read_csv(csv_path)
-
-# 讀取原圖
-image_path = "table_output/table.png"  # 你的表格圖路徑
-full_img = Image.open(image_path).convert("RGB")
-
-import textwrap
-
-import numpy as np
-import pandas as pd
-from easyocr import Reader
-from PIL import Image
-
-# 1. 取出欄、列邊界序列 ----------------------------------------------------
-col_boxes = df[df.label.eq('table column')][['x1', 'x2']].to_numpy()
-col_xs = np.unique(col_boxes.flatten())     
-col_xs = np.sort(col_xs)                 
-print("column edges =", col_xs)
-H = full_img.height
-column_texts = []  
-
-for idx in range(len(col_xs)-1):
-    x1, x2 = col_xs[idx], col_xs[idx+1]
-    # ※ 若想留一點 padding，可在此 x1-1, x2+1 做微調
-    col_crop = full_img.crop((x1, 0, x2, H))
-
-    # OCR（EasyOCR 一行行回傳）
-    reader = Reader(['ch_tra', 'en'])
-    res = reader.readtext(np.array(col_crop), detail=0)   # detail=0 僅文字
-    col_text = "".join(res).strip()
-    column_texts.append(col_text)
-
-    print(f"[Col {idx}] characters={len(col_text)}")
-
-for i, txt in enumerate(column_texts):
-    print(f"\n==== Column {i} ====\n{txt}")
+# 若 x2、y2 剛好等於邊界，容易造成寬/高=0，再保證各 >0
+if x2 - x1 < 2 or y2 - y1 < 2:           # 2 px 為下限，可依需求調
+    return {"page": page_num,
+            "media_type": "table",
+            "source": None,
+            "content": "❌ 表格範圍異常，已跳過"}      # 直接略過這張表
+tbl_crop = img.crop((x1, y1, x2, y2))
