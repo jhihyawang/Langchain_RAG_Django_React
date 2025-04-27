@@ -1,61 +1,40 @@
-
-import os
-
 import pandas as pd
-import torch
 from PIL import Image, ImageDraw, ImageFont
-from transformers import AutoImageProcessor, TableTransformerForObjectDetection
 
-# 參數設定
-image_path = "table_output/table.png"  # 表格圖像路徑
-output_img_path = "table_output/detected_cells.jpg"  # 檢測結果輸出圖
+csv_path = "table_output/table_cells.csv"
+df = pd.read_csv(csv_path)
 
-show_threshold = 0.7   # 信心門檻值（依資料自行微調）
+# 讀取原圖
+image_path = "table_output/table.png"  # 你的表格圖路徑
+full_img = Image.open(image_path).convert("RGB")
 
-# 載入圖片
-img = Image.open(image_path).convert("RGB")
+import textwrap
 
-# 載入模型和處理器
-processor = AutoImageProcessor.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
-processor.size['shortest_edge'] = 800  # 解決必填參數問題
-model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
+import numpy as np
+import pandas as pd
+from easyocr import Reader
+from PIL import Image
 
-# 推論
-inputs = processor(images=img, return_tensors="pt")
-with torch.no_grad():
-    outputs = model(**inputs)
+# 1. 取出欄、列邊界序列 ----------------------------------------------------
+col_boxes = df[df.label.eq('table column')][['x1', 'x2']].to_numpy()
+col_xs = np.unique(col_boxes.flatten())     
+col_xs = np.sort(col_xs)                 
+print("column edges =", col_xs)
+H = full_img.height
+column_texts = []  
 
-target_sizes = torch.tensor([img.size[::-1]])
-results = processor.post_process_object_detection(outputs, threshold=show_threshold, target_sizes=target_sizes)[0]
+for idx in range(len(col_xs)-1):
+    x1, x2 = col_xs[idx], col_xs[idx+1]
+    # ※ 若想留一點 padding，可在此 x1-1, x2+1 做微調
+    col_crop = full_img.crop((x1, 0, x2, H))
 
-# 可視化所有 cell 檢測框
-draw = ImageDraw.Draw(img)
-labels = []
-for i, (score, label, box) in enumerate(zip(results["scores"], results["labels"], results["boxes"])):
-    box = [round(float(v), 2) for v in box.tolist()]
-    if score < show_threshold: continue
-    draw.rectangle(box, outline="red", width=2)
-    # 在框的左上角標記 label 與序號
-    txt = f"{model.config.id2label[label.item()]}-{i}"
-    draw.text((box[0], box[1]), txt, fill="blue")
-    labels.append((txt, box))
-img.save(output_img_path)
-print(f"所有格子檢測結果已繪製於 {output_img_path}")
+    # OCR（EasyOCR 一行行回傳）
+    reader = Reader(['ch_tra', 'en'])
+    res = reader.readtext(np.array(col_crop), detail=0)   # detail=0 僅文字
+    col_text = "".join(res).strip()
+    column_texts.append(col_text)
 
-# 將所有 box 結果結構化存入 DataFrame
-data = []
-for i, (score, label, box) in enumerate(zip(results["scores"], results["labels"], results["boxes"])):
-    box = [round(float(v), 2) for v in box.tolist()]
-    data.append({
-        "index": i,
-        "label": model.config.id2label[label.item()],
-        "score": float(score),
-        "x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]
-    })
+    print(f"[Col {idx}] characters={len(col_text)}")
 
-df = pd.DataFrame(data)
-print(df.head())
-
-# 如果要存成 markdown 表格
-print(df.to_markdown(index=False))
-df.to_csv("table_output/table_cells.csv", index=False, encoding="utf-8")
+for i, txt in enumerate(column_texts):
+    print(f"\n==== Column {i} ====\n{txt}")
