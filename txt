@@ -1,31 +1,17 @@
-# --- column 邊界 ---
-col_boxes = df[df.label.eq('table column')][['x1', 'x2']].to_numpy()
-if len(col_boxes) == 0:
-    # fallback OCR …
-    ...
-
-col_xs = np.unique(np.round(col_boxes).astype(int))
-col_xs = np.sort(col_xs)
-# 最小間距 3 px
-clean = [col_xs[0]]
-for v in col_xs[1:]:
-    if v - clean[-1] >= 3:
-        clean.append(v)
-col_xs = np.array(clean)
-
-H = tbl_crop.height
+# ▲ 先收集欄位文字 -------------------------------------------------
 col_texts = []
-
 for ci in range(len(col_xs) - 1):
     cx1, cx2 = int(col_xs[ci]), int(col_xs[ci + 1])
     cx1 = max(0, cx1)
     cx2 = min(tbl_crop.width, cx2)
 
-    if cx2 - cx1 < 3:     # 忽略 0~2 px 的空白欄
-        col_texts.append("")
+    # 若寬度不足 3px 視為空欄
+    if cx2 - cx1 < 3:
+        col_texts.append("")                 # ← 顯式放入「空字串」
         continue
 
-    col_img = tbl_crop.crop((cx1, 0, cx2, H))
+    col_img = tbl_crop.crop((cx1, 0, cx2, tbl_crop.height))
+
     if col_img.width < 3:
         col_texts.append("")
         continue
@@ -35,4 +21,11 @@ for ci in range(len(col_xs) - 1):
     ).strip()
     col_texts.append(txt)
 
-content = "/".join(col_texts)
+# ★ 這裡確保全部轉成 str 再 join
+content = "/".join(str(t) for t in col_texts)
+print(f"表格內容：\n{content}")
+
+# ▼ 建立檔名（把數字先轉成字串）
+file_name = f"page{page_num}_table{tbl_idx+1}.png"
+path = os.path.join(self.output_dir, "tables", file_name)
+tbl_crop.save(path)
