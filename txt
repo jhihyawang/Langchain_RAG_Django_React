@@ -1,120 +1,77 @@
-    def is_table_like(self,boxes, col_repeat_min=3):
-        # x1 集中於幾個主軸（欄位），就像有很多「對齊」的格子
-        x1s = [b[0] for b in boxes]
-        from collections import Counter
-        counts = Counter([round(x/10)*10 for x in x1s])  # 取每10 pixel一組
-        repeat_cols = sum(1 for v in counts.values() if v >= col_repeat_min)
-        return repeat_cols >= 3  # 至少3個以上重複的 x1（欄位對齊），才判斷是表格    
+def extract_tables(self, img, page_num, tbl_idx, box):
+    """
+    先用 Table-Transformer structure model
+    ───────────────────────────────────
+    1. 取得 column 邊界 → col_xs
+    2. 逐欄 crop + OCR
+    3. 把欄文字依順序組成 markdown 表格（單列表格；若還要列切可再加 row 分割）
+    """
+    from transformers import AutoImageProcessor, TableTransformerForObjectDetection
+    import numpy as np
+    import easyocr, torch, os, textwrap
+    from PIL import Image
     
-    def merge_and_sort_ocr_boxes(self,ocr_result, conf_thres=0.5, x_tol=15, y_tol=12):
-        """
-        1. 只取 conf>0.5 的文字，2.空格切分，3.合併重疊/相連格子，4.按 y(行)分群再行內 x(左→右)排序
-        回傳一個按格子排列好的 list，每個元素是 [x1, y1, x2, y2, text]
-        """
-        # 1. 篩選高信心格子
-        boxes = []
-        for box, text, conf in ocr_result:
-            if conf >= conf_thres and text.strip():
-                xs = [pt[0] for pt in box]
-                ys = [pt[1] for pt in box]
-                x1, y1 = int(min(xs)), int(min(ys))
-                x2, y2 = int(max(xs)), int(max(ys))
-                boxes.append([x1, y1, x2, y2, text.strip()])
+    # ① 先把偵測到的整張表格 crop 下來
+    x1, y1, x2, y2 = map(int, box.tolist())
+    tbl_crop = img.crop((x1, y1, x2, y2))
+    save_path = os.path.join(self.output_dir, "tables", f"page{page_num}_table{tbl_idx+1}.png")
+    tbl_crop.save(save_path)
 
-        # 2. 空格切分
-        split_boxes = []
-        for x1, y1, x2, y2, text in boxes:
-            if " " in text and len(text.split()) > 1:
-                parts = [t for t in text.split() if t]
-                w = (x2 - x1) // len(parts)
-                for i, part in enumerate(parts):
-                    nx1 = x1 + i * w
-                    nx2 = nx1 + w if i < len(parts) - 1 else x2
-                    split_boxes.append([nx1, y1, nx2, y2, part])
-            else:
-                split_boxes.append([x1, y1, x2, y2, text])
+    # ② Table-Transformer structure recognition
+    proc   = AutoImageProcessor.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
+    model  = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
+    inputs = proc(images=tbl_crop, return_tensors="pt")
+    with torch.no_grad():
+        out = model(**inputs)
 
-        # 3. 合併 y1, y2（上下相連）、x範圍重疊的格子
-        merged = []
-        used = set()
-        for i, (x1, y1, x2, y2, text) in enumerate(split_boxes):
-            if i in used:
-                continue
-            group = [(x1, y1, x2, y2, text)]
-            for j, (xx1, yy1, xx2, yy2, t2) in enumerate(split_boxes):
-                if i == j or j in used:
-                    continue
-                # y2 ≈ yy1 或 y1 ≈ yy2，x範圍重疊
-                y_edge_close = abs(y2 - yy1) < y_tol or abs(y1 - yy2) < y_tol
-                x_overlap = min(x2, xx2) - max(x1, xx1) > -x_tol
-                if y_edge_close and x_overlap:
-                    group.append((xx1, yy1, xx2, yy2, t2))
-                    used.add(j)
-            # 合併
-            all_x1 = min(g[0] for g in group)
-            all_y1 = min(g[1] for g in group)
-            all_x2 = max(g[2] for g in group)
-            all_y2 = max(g[3] for g in group)
-            all_text = "".join(g[4] for g in sorted(group, key=lambda b: (b[1], b[0])))
-            merged.append([all_x1, all_y1, all_x2, all_y2, all_text])
-            used.add(i)
+    tgt_sz  = torch.tensor([tbl_crop.size[::-1]])
+    results = proc.post_process_object_detection(out, threshold=0.5, target_sizes=tgt_sz)[0]
 
-        # 4. 行 anchor 排序（用最左格的 x1 找 anchor row，行內再 x1 排序）
-        min_x = min(b[0] for b in merged) if merged else 0
-        anchor_boxes = [b for b in merged if abs(b[0] - min_x) < x_tol]
-        anchor_ys = sorted((b[1] + b[3]) // 2 for b in anchor_boxes)
-        def assign_row(y, anchors):
-            anchors = np.array(anchors)
-            return int(np.argmin(np.abs(anchors - y)))
-        row_groups = [[] for _ in anchor_ys]
-        for b in merged:
-            cy = (b[1] + b[3]) // 2
-            row_idx = assign_row(cy, anchor_ys)
-            row_groups[row_idx].append(b)
-        # 行內左到右
-        rows_sorted = [sorted(row, key=lambda b: b[0]) for row in row_groups]
-        ordered_boxes = [b for row in rows_sorted for b in row]
-        return ordered_boxes
+    # ③ 取得所有 column 邊界
+    col_boxes = [
+        b.tolist() for l,b in zip(results["labels"], results["boxes"])
+        if model.config.id2label[l.item()] == "table column"
+    ]
+    if not col_boxes:          # 若沒有偵測到 column，直接整表 OCR 當 fallback
+        reader = easyocr.Reader(['ch_tra','en'], gpu=False)
+        whole_txt = "\n".join(reader.readtext(np.array(tbl_crop), detail=0))
+        md = textwrap.dedent(f"""
+            | 內容 |
+            |:-----|
+            | {whole_txt.replace('|','｜')} |
+        """).strip()
+        return {
+            "page": page_num,
+            "image": save_path,
+            "content": md,
+            "media_type": "table"
+        }
 
-    def extract_texts(self, page, page_num, img=None):
-        try:
-            text = page.extract_text() or ""
-            if self.should_ocr(text) and img is not None:
-                # OCR 處理
-                path = os.path.join(self.output_dir, "ocr_fallback", f"page_{page_num}.png")
-                img.save(path)
-                ocr_results = self.reader.readtext(np.array(img))
-                # 判斷表格頁 or 純文字頁
-                if len(ocr_results) > 12 and self.is_table_like(ocr_results):
-                    # ====== 表格流程 ======
-                    ocr_boxes_sorted = self.merge_and_sort_ocr_boxes(ocr_results)
-                    # 轉成 markdown 格式（或 tab 分隔給 LLM）
-                    ocr_merged = "\t".join([b[4] for b in ocr_boxes_sorted])
-                    content = ocr_merged
-                    source = "ocr_table"
-                else:
-                    # ====== 純文字流程 ======
-                    ocr_texts = [t for _, t, conf in ocr_results if conf > 0.5]
-                    ocr_merged = "\n".join(ocr_texts) if ocr_texts else ""
-                    content = ocr_merged
-                    source = "ocr"
-            else:
-                # 直接取 pdfplumber 的文字
-                content = text
-                source = "ori"
+    col_xs = np.unique(np.array(col_boxes)[:, [0,2]].flatten())
+    col_xs = np.sort(col_xs)          # ex. [0, 55, 110, … , width]
 
-            print(f"文字內容:\n\n{content[:300]}...")  # 長文本可只顯示前幾百字
-            return {
-                "page": page_num,
-                "media_type": "text",
-                "source": source,
-                "content": content
-            }
-        except Exception as e:
-            log(f"❌ 第 {page_num} 頁文字抽取异常：{e}")
-            return {
-                "page": page_num,
-                "media_type": "text",
-                "source": None,
-                "content": f"❌ 文字抽取失敗：{e}"
-            }
+    # ④ 逐欄 crop + OCR
+    H = tbl_crop.height
+    reader = easyocr.Reader(['ch_tra','en'], gpu=False)
+    col_texts = []
+    for ci in range(len(col_xs)-1):
+        cx1, cx2 = int(col_xs[ci]), int(col_xs[ci+1])
+        # 邊界加 1px padding，避免文字被切掉
+        col_img = tbl_crop.crop((cx1+1, 0, cx2-1, H))
+        txt = "\n".join(reader.readtext(np.array(col_img), detail=0)).strip()
+        col_texts.append(txt.replace("|", "｜"))   # 避免干擾 markdown 分隔符
+
+    # ⑤ 組 markdown（單列；之後要加列可再 split）
+    md_header = "| " + " | ".join([f"Col{idx}" for idx in range(len(col_texts))]) + " |"
+    md_split  = "| " + " | ".join(["---"] * len(col_texts)) + " |"
+    md_row    = "| " + " | ".join(col_texts) + " |"
+    md_table  = "\n".join([md_header, md_split, md_row])
+
+    return {
+        "page": page_num,
+        "image": save_path,
+        "content": md_table,
+        "media_type": "table"
+    }
+若你已在 __init__ 先行建好 self.structure_processor / self.structure_model / self.reader，
+則把相應行改成使用 self.xxx（並把 model 下載搬到初始化階段，避免重複下載）。
