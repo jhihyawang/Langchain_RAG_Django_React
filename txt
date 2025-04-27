@@ -1,77 +1,35 @@
-def extract_tables(self, img, page_num, tbl_idx, box):
-    """
-    先用 Table-Transformer structure model
-    ───────────────────────────────────
-    1. 取得 column 邊界 → col_xs
-    2. 逐欄 crop + OCR
-    3. 把欄文字依順序組成 markdown 表格（單列表格；若還要列切可再加 row 分割）
-    """
-    from transformers import AutoImageProcessor, TableTransformerForObjectDetection
-    import numpy as np
-    import easyocr, torch, os, textwrap
-    from PIL import Image
-    
-    # ① 先把偵測到的整張表格 crop 下來
-    x1, y1, x2, y2 = map(int, box.tolist())
-    tbl_crop = img.crop((x1, y1, x2, y2))
-    save_path = os.path.join(self.output_dir, "tables", f"page{page_num}_table{tbl_idx+1}.png")
-    tbl_crop.save(save_path)
+# ——— 第二輪：若表格佔比低，再嘗試對「剩餘部分」做表格偵測 ———
+if table_ratio < 0.50:
+    log(f"第 {i} 頁表格佔比 < 50 %，嘗試對剩餘區域再做一次表格偵測")
 
-    # ② Table-Transformer structure recognition
-    proc   = AutoImageProcessor.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
-    model  = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
-    inputs = proc(images=tbl_crop, return_tensors="pt")
+    # ➊ 用 mask 把偵測到的表格區域塗黑
+    mask = Image.new("L", img.size, 0)               # 黑 = 0
+    draw = ImageDraw.Draw(mask)
+    for b in det["boxes"]:
+        x1,y1,x2,y2 = map(int, b.tolist())
+        draw.rectangle([x1,y1,x2,y2], fill=255)      # 表格區域塗白(255)
+
+    # ➋ 取“非表格”部分 (反相 + alpha) 形成副圖片
+    inverted = ImageChops.invert(mask)
+    bg = Image.new("RGB", img.size, (255,255,255))
+    remainder = Image.composite(img, bg, inverted)   # 只有剩餘內容
+
+    # ➌ 對 remainder 再跑 table-transformer
+    rem_inputs  = self.processor(images=remainder, return_tensors="pt").to(self.detect_device)
     with torch.no_grad():
-        out = model(**inputs)
+        rem_out = self.detector(**rem_inputs)
+    rem_det = self.processor.post_process_object_detection(
+        rem_out, threshold=0.5, target_sizes=torch.tensor([img.size[::-1]]).to(self.detect_device)
+    )[0]
 
-    tgt_sz  = torch.tensor([tbl_crop.size[::-1]])
-    results = proc.post_process_object_detection(out, threshold=0.5, target_sizes=tgt_sz)[0]
-
-    # ③ 取得所有 column 邊界
-    col_boxes = [
-        b.tolist() for l,b in zip(results["labels"], results["boxes"])
-        if model.config.id2label[l.item()] == "table column"
-    ]
-    if not col_boxes:          # 若沒有偵測到 column，直接整表 OCR 當 fallback
-        reader = easyocr.Reader(['ch_tra','en'], gpu=False)
-        whole_txt = "\n".join(reader.readtext(np.array(tbl_crop), detail=0))
-        md = textwrap.dedent(f"""
-            | 內容 |
-            |:-----|
-            | {whole_txt.replace('|','｜')} |
-        """).strip()
-        return {
-            "page": page_num,
-            "image": save_path,
-            "content": md,
-            "media_type": "table"
-        }
-
-    col_xs = np.unique(np.array(col_boxes)[:, [0,2]].flatten())
-    col_xs = np.sort(col_xs)          # ex. [0, 55, 110, … , width]
-
-    # ④ 逐欄 crop + OCR
-    H = tbl_crop.height
-    reader = easyocr.Reader(['ch_tra','en'], gpu=False)
-    col_texts = []
-    for ci in range(len(col_xs)-1):
-        cx1, cx2 = int(col_xs[ci]), int(col_xs[ci+1])
-        # 邊界加 1px padding，避免文字被切掉
-        col_img = tbl_crop.crop((cx1+1, 0, cx2-1, H))
-        txt = "\n".join(reader.readtext(np.array(col_img), detail=0)).strip()
-        col_texts.append(txt.replace("|", "｜"))   # 避免干擾 markdown 分隔符
-
-    # ⑤ 組 markdown（單列；之後要加列可再 split）
-    md_header = "| " + " | ".join([f"Col{idx}" for idx in range(len(col_texts))]) + " |"
-    md_split  = "| " + " | ".join(["---"] * len(col_texts)) + " |"
-    md_row    = "| " + " | ".join(col_texts) + " |"
-    md_table  = "\n".join([md_header, md_split, md_row])
-
-    return {
-        "page": page_num,
-        "image": save_path,
-        "content": md_table,
-        "media_type": "table"
-    }
-若你已在 __init__ 先行建好 self.structure_processor / self.structure_model / self.reader，
-則把相應行改成使用 self.xxx（並把 model 下載搬到初始化階段，避免重複下載）。
+    if len(rem_det["boxes"]):                 # ➜ 副檢測確實還有表格
+        log(f"⚡ 副檢測額外找到 {len(rem_det['boxes'])} 個小表格")
+        for ridx, rbox in enumerate(rem_det["boxes"]):
+            tbl = self.extract_tables(remainder, i, f"{idx+1}-{ridx+1}", rbox)
+            page_results.append(tbl)
+    else:
+        log("副檢測未再找到表格 → 直接提取文字與圖片")
+        txt  = self.extract_texts(page, i, img)
+        page_results.append(txt)
+        page_results.extend(self.extract_imgs(doc, i))
+##################################################################
