@@ -3,7 +3,7 @@ import numpy as np
 def extract_tables(self, img, i, j, box):
     import json, os
     coords = box.tolist()  # [x1, y1, x2, y2]
-    expand_coords = [coords[0]-50, coords[1]-40, coords[2]+50, coords[3]+50]
+    expand_coords = [coords[0]-50, coords[1]-100, coords[2]+50, coords[3]+50]
     cropped = img.crop(expand_coords)
     path = os.path.join(self.output_dir, "tables", f"page{i}_table{j+1}.png")
     cropped.save(path)
