@@ -1,7 +1,88 @@
-# 這裡將 title, page_number 都加到每段 content 前面
-context = "\n\n".join(
-    [
-        f"【文件：{doc['title']}｜頁碼：{doc['page_number']}】\n{doc['content']}"
-        for doc in retrieved_docs
-    ]
-)
+def is_table_like(boxes, col_repeat_min=3):
+    # x1 集中於幾個主軸（欄位），就像有很多「對齊」的格子
+    x1s = [b[0] for b in boxes]
+    from collections import Counter
+    counts = Counter([round(x/10)*10 for x in x1s])  # 取每10 pixel一組
+    repeat_cols = sum(1 for v in counts.values() if v >= col_repeat_min)
+    return repeat_cols >= 3  # 至少3個以上重複的 x1（欄位對齊），才判斷是表格
+
+def merge_and_sort_ocr_boxes(ocr_result, conf_thres=0.5, x_tol=15, y_tol=12):
+    """
+    1. 只取 conf>0.5 的文字，2.空格切分，3.合併重疊/相連格子，4.按 y(行)分群再行內 x(左→右)排序
+    回傳一個按格子排列好的 list，每個元素是 [x1, y1, x2, y2, text]
+    """
+    # 1. 篩選高信心格子
+    boxes = []
+    for box, text, conf in ocr_result:
+        if conf >= conf_thres and text.strip():
+            xs = [pt[0] for pt in box]
+            ys = [pt[1] for pt in box]
+            x1, y1 = int(min(xs)), int(min(ys))
+            x2, y2 = int(max(xs)), int(max(ys))
+            boxes.append([x1, y1, x2, y2, text.strip()])
+
+    # 2. 空格切分
+    split_boxes = []
+    for x1, y1, x2, y2, text in boxes:
+        if " " in text and len(text.split()) > 1:
+            parts = [t for t in text.split() if t]
+            w = (x2 - x1) // len(parts)
+            for i, part in enumerate(parts):
+                nx1 = x1 + i * w
+                nx2 = nx1 + w if i < len(parts) - 1 else x2
+                split_boxes.append([nx1, y1, nx2, y2, part])
+        else:
+            split_boxes.append([x1, y1, x2, y2, text])
+
+    # 3. 合併 y1, y2（上下相連）、x範圍重疊的格子
+    merged = []
+    used = set()
+    for i, (x1, y1, x2, y2, text) in enumerate(split_boxes):
+        if i in used:
+            continue
+        group = [(x1, y1, x2, y2, text)]
+        for j, (xx1, yy1, xx2, yy2, t2) in enumerate(split_boxes):
+            if i == j or j in used:
+                continue
+            # y2 ≈ yy1 或 y1 ≈ yy2，x範圍重疊
+            y_edge_close = abs(y2 - yy1) < y_tol or abs(y1 - yy2) < y_tol
+            x_overlap = min(x2, xx2) - max(x1, xx1) > -x_tol
+            if y_edge_close and x_overlap:
+                group.append((xx1, yy1, xx2, yy2, t2))
+                used.add(j)
+        # 合併
+        all_x1 = min(g[0] for g in group)
+        all_y1 = min(g[1] for g in group)
+        all_x2 = max(g[2] for g in group)
+        all_y2 = max(g[3] for g in group)
+        all_text = "".join(g[4] for g in sorted(group, key=lambda b: (b[1], b[0])))
+        merged.append([all_x1, all_y1, all_x2, all_y2, all_text])
+        used.add(i)
+
+    # 4. 行 anchor 排序（用最左格的 x1 找 anchor row，行內再 x1 排序）
+    min_x = min(b[0] for b in merged) if merged else 0
+    anchor_boxes = [b for b in merged if abs(b[0] - min_x) < x_tol]
+    anchor_ys = sorted((b[1] + b[3]) // 2 for b in anchor_boxes)
+    def assign_row(y, anchors):
+        anchors = np.array(anchors)
+        return int(np.argmin(np.abs(anchors - y)))
+    row_groups = [[] for _ in anchor_ys]
+    for b in merged:
+        cy = (b[1] + b[3]) // 2
+        row_idx = assign_row(cy, anchor_ys)
+        row_groups[row_idx].append(b)
+    # 行內左到右
+    rows_sorted = [sorted(row, key=lambda b: b[0]) for row in row_groups]
+    ordered_boxes = [b for row in rows_sorted for b in row]
+    return ordered_boxes
+
+# 判斷本頁格子數/表格結構比例
+if len(ocr_boxes) > 12 and is_table_like(ocr_boxes):  # 你可自訂「表格」的判斷
+    # 表格處理：合併＋排序
+    ocr_boxes_sorted = merge_and_sort_ocr_boxes(ocr_result)
+    merged_text = "\t".join([b[4] for b in ocr_boxes_sorted])
+    # 下 LLM table prompt
+else:
+    # 純文字：直接合併
+    ocr_text = "\n".join([text for _, text, conf in ocr_result if conf > 0.5])
+    # 可直接給 LLM 或儲存
