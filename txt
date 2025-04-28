@@ -1,10 +1,59 @@
-+   # 只取出 label 為 'table' 的索引
-+   table_idxs = df2.index[df2.label == 'table'].tolist()
-+   if table_idxs:
-+       base_idx = len(det["boxes"])
-+       # 只對那些被標為 'table' 的 boxes 再做 extract_tables
-+       for j, idx2 in enumerate(table_idxs):
-+           box2 = sec["boxes"][idx2]
-+           page_results.append(
-+               self.extract_tables(masked_img, i, base_idx + j, box2)
-+           )
+# tasks.py
+import os
+import fitz  # PyMuPDF
+import json
+from background_task import background
+from django.conf import settings
+from django.core.mail import send_mail
+
+from common.modules.processor.pdf_processor import PdfProcessor
+from common.modules.processor.vector_store import VectorStoreHandler
+from enterprise_assistant.models import Knowledge
+
+
+@background(schedule=0)
+def process_pdf_background(knowledge_id):
+    # 取出該筆知識
+    k = Knowledge.objects.get(id=knowledge_id)
+
+    # 只處理還沒動過的（pending），其餘直接跳過
+    if k.processing_status != 'pending':
+        return
+
+    # 標記為處理中
+    k.processing_status = 'processing'
+    k.save(update_fields=['processing_status'])
+
+    try:
+        # --- 1. PDF 處理流程 ---
+        processor = PdfProcessor(pdf_path=k.file.path, knowledge_id=knowledge_id)
+        result, rotated_pages = processor.optimized_process()
+
+        # --- 2. 寫入向量庫 & 更新 Knowledge 內容與 chunk 數 ---
+        vectorstore = VectorStoreHandler(db_path="chroma_user_db")
+        chunks = vectorstore.list(knowledge_id)
+        k.content = chunks[0]['content'] if chunks else ""
+        k.chunk   = len(chunks)
+
+        # 標記為完成
+        k.processing_status = 'done'
+        k.save(update_fields=['content', 'chunk', 'processing_status'])
+
+        # --- 3. 如果有旋轉頁，更新原始 PDF 文件 ---
+        if rotated_pages:
+            pdf_path = k.file.path
+            doc = fitz.open(pdf_path)
+            for pg in rotated_pages:
+                p = doc[pg - 1]
+                p.set_rotation((p.rotation + 90) % 360)
+            temp = pdf_path + ".rotated"
+            doc.save(temp)
+            doc.close()
+            os.replace(temp, pdf_path)
+
+    except Exception as e:
+        # 發生錯誤，標記 error
+        k.processing_status = 'error'
+        k.save(update_fields=['processing_status'])
+        print(f"❌ 處理失敗：{e}")
+        return
