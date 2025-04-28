@@ -1,6 +1,12 @@
-+            img = None
-+            if i in need_img:
-+                pix = doc.load_page(i-1).get_pixmap(dpi=self.dpi)
-+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    def mask_table_regions(self,img: Image.Image, boxes):
+        """
+        把 det['boxes'] 所有區塊塗黑，回傳新的 PIL.Image
+        """
+        masked = img.copy()
+        draw = ImageDraw.Draw(masked)
+        for b in boxes:
+            x1, y1, x2, y2 = map(int, b.tolist())
+            draw.rectangle([x1, y1, x2, y2], fill="black")
+        return masked
 
-最後把所有對 page_images 的引用都刪掉（後面直接用 img 即可）。這樣就完全回到用 PyMuPDF 轉圖的方式，不必預先一次載入所有頁面，也不需要 pdf2image 了。
+from PIL import Image, ImageChops, ImageDraw  # 圖像處理
