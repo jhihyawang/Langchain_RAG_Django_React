@@ -1,15 +1,76 @@
-class Knowledge(models.Model):
-   processing_status = models.CharField(max_length=20, default="pending")  # 'pending', 'processing', 'done', 'error'
-   # 加入 queued 狀態
-   PROCESSING_STATUS_CHOICES = [
-       ('pending',     '等待排程'),
-       ('queued',      '已排隊'),
-       ('processing',  '處理中'),
-       ('done',        '完成'),
-       ('error',       '錯誤'),
-   ]
-   processing_status = models.CharField(
-       max_length=20,
-       choices=PROCESSING_STATUS_CHOICES,
-       default='pending'
-   )
+     def post(self, request, *args, **kwargs):
+         # … 檔案驗證 & 建立 knowledge 這段不變 …
+ 
+-        # 只排剛上傳的
+-        process_pdf_background(knowledge.id)
++        # 1. 把所有「pending」標成「queued」
++        pending_qs = Knowledge.objects.filter(processing_status='pending')
++        pending_qs.update(processing_status='queued')
++
++        # 2. 為每一筆 queued 的建立背景任務（只會排一次）
++        for k in pending_qs:
++            process_pdf_background(k.id)
+ 
+         # 回傳
+         return standard_response(
+             message="檔案已上傳，背景處理中",
+             data=KnowledgeSerializer(knowledge).data
+         )
+
+ @background(schedule=0)
+ def process_pdf_background(knowledge_id):
+-    try:
+-        knowledge = Knowledge.objects.get(id=knowledge_id)
++    k = Knowledge.objects.get(id=knowledge_id)
++    # 只有 queued 的才執行
++    if k.processing_status != 'queued':
++        return
++
++    # 標成 processing
++    k.processing_status = 'processing'
++    k.save(update_fields=['processing_status'])
+
++    try:
+         # --- PDF 處理流程不變 ---
+-        if not knowledge.file or not os.path.exists(knowledge.file.path):
+-            ...
+-        else:
+-            knowledge.processing_status = "processing"
+-            knowledge.save()
++        processor = PdfProcessor(pdf_path=k.file.path, knowledge_id=knowledge_id)
++        result, rotated_pages = processor.optimized_process()
+ 
+         # 寫向量庫 & 更新 first_chunk、chunk count
+         vectorstore = VectorStoreHandler("chroma_user_db")
+-        chunks = vectorstore.list(knowledge_id)
+-        first_chunk = chunks[0].get("content") if chunks else ""
+-        knowledge.content = first_chunk
+-        knowledge.chunk = len(chunks)
++        chunks = vectorstore.list(knowledge_id)
++        k.content = chunks[0]['content'] if chunks else ""
++        k.chunk   = len(chunks)
+ 
+-        knowledge.processing_status = "done"
+-        knowledge.save()
++        # 處理成功
++        k.processing_status = 'done'
++        k.save(update_fields=['content','chunk','processing_status'])
+ 
+         # （原始檔旋轉邏輯照抄…）
+ 
+-    except Exception as e:
+-        knowledge.processing_status = "error"
+-        knowledge.save()
+-        print(f"❌ 處理失敗：{e}")
+-
+-    # 遞迴下一筆…
+-    next_knowledge = Knowledge.objects.filter(processing_status="pending")\
+-                           .order_by("created_at").first()
+-    if next_knowledge:
+-        process_pdf_background(next_knowledge.id)
++    except Exception as e:
++        # 處理失敗
++        k.processing_status = 'error'
++        k.save(update_fields=['processing_status'])
++        print(f"❌ 處理失敗：{e}")
++        return
