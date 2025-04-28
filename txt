@@ -1,28 +1,64 @@
-    def post(self, request, *args, **kwargs):
-        # 1. 驗證上傳檔案
-        if "file" not in request.FILES:
-            return Response({"success": False, "message": "請上傳文件"}, status=status.HTTP_400_BAD_REQUEST)
-        file = request.FILES["file"]
-        if not file.name.lower().endswith(".pdf"):
-            return Response({"success": False, "message": "只允許上傳 PDF"}, status=status.HTTP_400_BAD_REQUEST)
+    def __init__(self, pdf_path, vectorstore="chroma_user_db", output_dir="media", model_name="gemma3:27b", knowledge_id=None, knowledge_title="未知文件",cid_threshold=20):
+        self.pdf_path = pdf_path
+        self.file_stem = os.path.splitext(os.path.basename(pdf_path))[0]
+        self.output_dir = os.path.join(output_dir,"extract_data",self.file_stem)
+        self.model_name = model_name
+        self.knowledge_id = knowledge_id
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # 🔽 讓 OCR reader 用 GPU
+        self.reader = Reader(['ch_tra', 'en'], gpu=(self.device=="cuda"))
+        # 🔽 Detector, Model 也都放上 GPU
+        self.detector = AutoModelForObjectDetection.from_pretrained("microsoft/table-transformer-detection", revision="no_timm").to(self.device)
+        self.processor = AutoProcessor.from_pretrained("microsoft/table-transformer-detection", revision="no_timm")
+        self.proc = AutoImageProcessor.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
+        self.proc.size['shortest_edge'] = 800
+        self.model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all").to(self.device)
+        self.cid_threshold = cid_threshold
+        self.dpi = 300
+        self.vectorstore = VectorStoreHandler(db_path=vectorstore)
+        self.knowledge_title = knowledge_title
+     
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "images"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "tables"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "ocr_fallback"), exist_ok=True)
 
-        # 2. 建立 Knowledge (processing_status 會預設為 'pending')
-        department = request.data.get("department", "")
-        author_id  = request.data.get("author", None)
-        knowledge = Knowledge.objects.create(
-            file=file,
-            department=department,
-            author_id=author_id,
-            title=os.path.splitext(file.name)[0],
-            processing_status="pending"
-        )
 
-        # 3. 只為這一筆建立背景任務
-        process_pdf_background(knowledge.id)
+    def extract_tables(self, img, page_num, tbl_idx, box, media_type):
+        try:
+            # ...（前面程式同原本）
+            inputs = self.proc(images=tbl_crop, return_tensors="pt")
+            # 🔽 保證 inputs tensor 都在 self.device
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                out = self.model(**inputs)
+            tgt_sz  = torch.tensor([tbl_crop.size[::-1]]).to(self.device)
+            results = self.proc.post_process_object_detection(out, threshold=0.5, target_sizes=tgt_sz)[0]
 
-        # 4. 回傳
-        return Response({
-            "success": True,
-            "message": "檔案已上傳，背景處理中",
-            "data": KnowledgeSerializer(knowledge).data
-        }, status=status.HTTP_200_OK)
+
+                if angle == 90:
+                    img = img.rotate(-90, expand=True)
+                    rotated_pages.append(i)
+                    log(f"第 {i} 页旋轉 90 度")
+
+                # 🔽 使用 GPU
+                inputs = self.processor(images=img, return_tensors="pt")
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = self.detector(**inputs)
+                target_sizes = torch.tensor([img.size[::-1]]).to(self.device)
+                det = self.processor.post_process_object_detection(
+                    outputs, threshold=0.5, target_sizes=target_sizes
+                )[0]
+
+                # ...（略：其餘部分同理，如下）
+                masked_img = self.mask_table_regions(img, det["boxes"])
+                inputs2 = self.proc(images=masked_img, return_tensors="pt")
+                inputs2 = {k: v.to(self.device) for k, v in inputs2.items()}
+                with torch.no_grad():
+                    out2 = self.model(**inputs2)
+                tgt2 = torch.tensor([masked_img.size[::-1]]).to(self.device)
+                sec = self.proc.post_process_object_detection(
+                    out2, threshold=0.5, target_sizes=tgt2
+                )[0]
+                # ...（略）
