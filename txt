@@ -1,12 +1,10 @@
-    def mask_table_regions(self,img: Image.Image, boxes):
-        """
-        把 det['boxes'] 所有區塊塗黑，回傳新的 PIL.Image
-        """
-        masked = img.copy()
-        draw = ImageDraw.Draw(masked)
-        for b in boxes:
-            x1, y1, x2, y2 = map(int, b.tolist())
-            draw.rectangle([x1, y1, x2, y2], fill="black")
-        return masked
-
-from PIL import Image, ImageChops, ImageDraw  # 圖像處理
++   # 只取出 label 為 'table' 的索引
++   table_idxs = df2.index[df2.label == 'table'].tolist()
++   if table_idxs:
++       base_idx = len(det["boxes"])
++       # 只對那些被標為 'table' 的 boxes 再做 extract_tables
++       for j, idx2 in enumerate(table_idxs):
++           box2 = sec["boxes"][idx2]
++           page_results.append(
++               self.extract_tables(masked_img, i, base_idx + j, box2)
++           )
