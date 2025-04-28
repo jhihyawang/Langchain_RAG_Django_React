@@ -1,31 +1,484 @@
-# ▲ 先收集欄位文字 -------------------------------------------------
-col_texts = []
-for ci in range(len(col_xs) - 1):
-    cx1, cx2 = int(col_xs[ci]), int(col_xs[ci + 1])
-    cx1 = max(0, cx1)
-    cx2 = min(tbl_crop.width, cx2)
+import io  # 處理二進位串流（如圖片、PDF 影像）
+import json  # 處理 JSON 序列化/反序列化
+import os  # 檔案與目錄操作
+import re  # 正則表達式，用於文字匹配
+import time  # 計時
+from datetime import datetime  # 取得並格式化當前時間
 
-    # 若寬度不足 3px 視為空欄
-    if cx2 - cx1 < 3:
-        col_texts.append("")                 # ← 顯式放入「空字串」
-        continue
+import fitz  # PyMuPDF，用於 PDF 讀取與渲染
+import numpy as np  # 科學運算庫
+import ollama  # 本地 LLM 呼叫
+import pandas as pd  # 資料處理，用於表格結構
+import pdfplumber  # PDF 文字、表格萃取
+import torch  # 深度學習運算框架
+from easyocr import Reader  # OCR 工具
+from pdf2image import convert_from_path  # 新增：pdf2image 轉 PDF 為 PIL 圖像
+from PIL import Image, ImageChops, ImageDraw  # 圖像處理
+from transformers import AutoImageProcessor  # 結構識別前處理
+from transformers import AutoModelForObjectDetection  # 物件偵測模型
+from transformers import AutoProcessor  # 偵測前處理
+from transformers import TableTransformerForObjectDetection  # 表格結構偵測模型
 
-    col_img = tbl_crop.crop((cx1, 0, cx2, tbl_crop.height))
+from common.modules.processor.vector_store import VectorStoreHandler  # 向量資料庫操作
 
-    if col_img.width < 3:
-        col_texts.append("")
-        continue
 
-    txt = "".join(
-        self.reader.readtext(np.array(col_img), detail=0)
-    ).strip()
-    col_texts.append(txt)
+def log(msg):
+    """
+    統一日誌輸出，前綴 [YYYY-MM-DD hh:mm:ss]
+    """
+    now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    print(f"{now} {msg}")
 
-# ★ 這裡確保全部轉成 str 再 join
-content = "/".join(str(t) for t in col_texts)
-print(f"表格內容：\n{content}")
 
-# ▼ 建立檔名（把數字先轉成字串）
-file_name = f"page{page_num}_table{tbl_idx+1}.png"
-path = os.path.join(self.output_dir, "tables", file_name)
-tbl_crop.save(path)
+class PdfProcessor:
+    """
+    PDF 全流程處理類別，支援：
+    - 判斷是否 OCR
+    - 文字抽取
+    - 圖片抽取
+    - 表格偵測與解析
+    - LLM 圖像重建
+    - 向量庫寫入
+    """
+
+    def __init__(
+        self,
+        pdf_path,
+        vectorstore="chroma_user_db",
+        output_dir="media",
+        model_name="gemma3:27b",
+        knowledge_id=None,
+        knowledge_title="未知文件",
+        cid_threshold=20
+    ):
+        # --- 基本參數初始化 ---
+        self.pdf_path = pdf_path
+        self.file_stem = os.path.splitext(os.path.basename(pdf_path))[0]
+        self.model_name = model_name
+        self.knowledge_id = knowledge_id
+        self.knowledge_title = knowledge_title
+        self.cid_threshold = cid_threshold       # 判斷 OCR 閾值
+        self.dpi = 300                           # PDF 渲染解析度
+        
+        # --- GPU / CPU 裝置選擇 ---
+        # 若有可用 CUDA，就使用 GPU，否則回落到 CPU
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.detect_device = self.device
+
+        # --- 建立輸出資料夾 ---
+        self.output_dir = os.path.join(output_dir, "extract_data", self.file_stem)
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "images"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "tables"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "ocr_fallback"), exist_ok=True)
+
+        # --- OCR Reader（啟用 GPU 加速）---
+        self.reader = Reader(['ch_tra', 'en'], gpu=torch.cuda.is_available())
+
+        # --- 表格偵測模型 & 前處理 ---
+        self.detector = AutoModelForObjectDetection.from_pretrained(
+            "microsoft/table-transformer-detection", revision="no_timm"
+        ).to(self.detect_device)
+        self.processor = AutoProcessor.from_pretrained(
+            "microsoft/table-transformer-detection", revision="no_timm"
+        )
+
+        # --- 表格結構識別模型 & 前處理 ---
+        self.proc = AutoImageProcessor.from_pretrained(
+            "microsoft/table-transformer-structure-recognition-v1.1-all"
+        )
+        # 調整最短邊，提高小表格偵測
+        self.proc.size['shortest_edge'] = 800
+        self.model = TableTransformerForObjectDetection.from_pretrained(
+            "microsoft/table-transformer-structure-recognition-v1.1-all"
+        ).to(self.device)
+
+        # --- 向量資料庫 Handler ---
+        self.vectorstore = VectorStoreHandler(db_path=vectorstore)
+
+
+    def should_ocr(self, text: str) -> bool:
+        """
+        判斷是否需要 OCR：
+        若提取文字中包含過多 CID（亂碼）字元或 (cid:123) 標記，
+        超過 cid_threshold，就使用 OCR 分支
+        """
+        cid_unicode = len(re.findall(r'[\ue000-\uf8ff]', text))
+        cid_marker  = len(re.findall(r'\(cid:\d+\)', text))
+        if cid_unicode + cid_marker >= self.cid_threshold:
+            print(f"CID 達 {cid_unicode + cid_marker}，使用 OCR")
+            return True
+        else:
+            print("文字正常，使用 pdfplumber")
+            return False
+
+
+    def summarize_image(self, image_paths, prompt: str) -> str:
+        """
+        呼叫本地 Ollama LLM，對影像進行內容重建
+        image_paths: 圖片路徑列表或單一路徑
+        prompt: LLM 提示詞
+        """
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        log("[解析圖片或整頁影像]")
+        system_prompt = (
+            "你是一位重建圖片內容的助手。"
+            "直接還原內容，不要開場白或額外說明，只回傳純內容。"
+        )
+        try:
+            resp = ollama.chat(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": prompt, "images": image_paths}
+                ]
+            )
+            return resp['message']['content']
+        except Exception as e:
+            return f"❌ 圖像分析錯誤: {e}"
+
+
+    def detect_rotation_angle_easyocr(self, ocr_result, min_text_count=5, vertical_angle_range=(75, 105)) -> int:
+        """
+        使用 EasyOCR 結果判斷是否需旋轉頁面 90 度：
+        - 若垂直文字 >50% 或 短文字>40% 或 高寬比>40%，旋轉
+        """
+        vertical = short = tall = 0
+        total   = len(ocr_result)
+        for box, text, _ in ocr_result:
+            # 算出文字框的角度
+            dx, dy = box[1][0]-box[0][0], box[1][1]-box[0][1]
+            angle = abs(np.degrees(np.arctan2(dy, dx)))
+            if vertical_angle_range[0] <= angle <= vertical_angle_range[1]:
+                vertical += 1
+            if len(text.strip()) <= 1:
+                short += 1
+            w = np.linalg.norm(np.array(box[0]) - np.array(box[1]))
+            h = np.linalg.norm(np.array(box[0]) - np.array(box[3]))
+            if h > w * 2:
+                tall += 1
+        if total < min_text_count:
+            return 0
+        if vertical/total > 0.5 or short/total > 0.4 or tall/total > 0.4:
+            return 90
+        return 0
+
+
+    def calculate_table_area(self, box) -> float:
+        """
+        計算單一表格框面積
+        box: [x1, y1, x2, y2]
+        """
+        x1, y1, x2, y2 = box
+        return abs((x2-x1)*(y2-y1))
+
+
+    def extract_tables(self, img: Image.Image, page_num: int, idx: int, box) -> dict:
+        """
+        檢測並解析單一表格：
+        1. 擴展範圍後截圖
+        2. Table-Transformer 物件偵測
+        3. Table-Transformer 結構識別
+        4. 拆欄 OCR
+        回傳 dict(page, media_type, source, content)
+        """
+        try:
+            print("開始提取表格")
+            w, h = img.size
+            coords = box.tolist()  # [x1,y1,x2,y2]
+            x1 = max(0, coords[0]-50)
+            y1 = max(0, coords[1]-50)
+            x2 = min(w, coords[2]+50)
+            y2 = min(h, coords[3]+50)
+            if x2-x1 < 2 or y2-y1 < 2:
+                return {"page":page_num, "media_type":"table", "source":None, "content":"❌ 範圍異常"}
+            crop = img.crop((x1, y1, x2, y2))
+            fname = f"page{page_num}_table{idx+1}.png"
+            path  = os.path.join(self.output_dir, "tables", fname)
+            crop.save(path)
+
+            # 物件偵測
+            inputs = self.proc(images=crop, return_tensors="pt")
+            inputs = {k:v.to(self.device) for k,v in inputs.items()}
+            with torch.no_grad():
+                out = self.model(**inputs)
+            tgt = torch.tensor([crop.size[::-1]]).to(self.device)
+            results = self.proc.post_process_object_detection(out, threshold=0.5, target_sizes=tgt)[0]
+
+            # 轉成 DataFrame
+            data = []
+            for i, (lbl, box) in enumerate(zip(results["labels"], results["boxes"])):
+                coords = [round(float(v),2) for v in box.tolist()]
+                data.append({
+                    "label": self.model.config.id2label[lbl.item()],
+                    "x1": coords[0], "y1": coords[1],
+                    "x2": coords[2], "y2": coords[3]
+                })
+            df = pd.DataFrame(data)
+
+            # 如果沒找到欄邊界，整表 OCR
+            col_boxes = df[df.label=='table column'][['x1','x2']].to_numpy()
+            if len(col_boxes)==0:
+                ocr = self.reader.readtext(np.array(crop))
+                merged = "\r\n".join([r[1] for r in ocr])
+                return {"page":page_num, "media_type":"table","source":path,"content":merged}
+
+            # 去重排序欄邊界
+            xs = np.unique(np.round(col_boxes).astype(int))
+            clean = [xs[0]]
+            for v in xs[1:]:
+                if v-clean[-1]>=3:
+                    clean.append(v)
+            xs = np.array(clean)
+
+            # 逐欄 OCR
+            texts = []
+            for i in range(len(xs)-1):
+                x_start, x_end = xs[i], xs[i+1]
+                if x_end-x_start<3:
+                    texts.append("")
+                    continue
+                col_img = crop.crop((x_start, 0, x_end, crop.height))
+                txt = "".join(self.reader.readtext(np.array(col_img), detail=0)).strip()
+                texts.append(txt)
+            content = "\n\n".join(texts)
+            print(f"表格內容：\n{content}")
+            return {"page":page_num,"media_type":"table","source":path,"content":content}
+
+        except Exception as e:
+            log(f"❌ 表格提取例外：第 {page_num} 頁, 表格 {idx+1}：{e}")
+            return {"page":page_num,"media_type":"table","source":None,"content":f"❌ 提取失敗：{e}"}
+        
+    def mask_table_regions(self,img: Image.Image, boxes):
+        """
+        把 det['boxes'] 所有區塊塗黑，回傳新的 PIL.Image
+        """
+        masked = img.copy()
+        draw = ImageDraw.Draw(masked)
+        for b in boxes:
+            x1, y1, x2, y2 = map(int, b.tolist())
+            draw.rectangle([x1, y1, x2, y2], fill="black")
+        return masked
+
+    def extract_texts(self, page, page_num, img=None) -> dict:
+        """
+        擷取文字：
+        - 若 should_ocr 回傳 True，且有 img，則 OCR fallback
+        - 否則使用 pdfplumber 直接抽文字
+        """
+        try:
+            text = page.extract_text() or ""
+            if self.should_ocr(text) and img is not None:
+                # OCR 分支
+                path = os.path.join(self.output_dir, "ocr_fallback", f"page_{page_num}.png")
+                img.save(path)
+                ocr = self.reader.readtext(np.array(img))
+                txts = [t for _,t,conf in ocr if conf>0.5]
+                merged = "".join(txts)
+                return {"page":page_num,"media_type":"text","source":"ocr","content":merged}
+            else:
+                # 原文字
+                return {"page":page_num,"media_type":"text","source":"ori","content":text}
+
+        except Exception as e:
+            log(f"❌ 文字抽取失敗：第 {page_num} 頁：{e}")
+            return {"page":page_num,"media_type":"text","source":None,"content":f"❌ 抽取失敗：{e}"}
+
+
+    def extract_imgs(self, doc, page_num) -> list:
+        """
+        擷取頁面內所有圖片，OCR 快篩 + LLM 描述
+        """
+        res = []
+        try:
+            page = doc.load_page(page_num-1)
+            imgs = page.get_images(full=True)
+            for idx, info in enumerate(imgs):
+                xref = info[0]
+                base = doc.extract_image(xref)
+                img = Image.open(io.BytesIO(base["image"]))
+                ocr = self.reader.readtext(np.array(img))
+                txts = [t for _,t,conf in ocr if conf>0.5]
+                merged = "".join(txts)
+                if len(merged)<15:
+                    log(f"⚠️ 第{page_num}頁第{idx+1}張圖片 OCR不足，跳過")
+                    continue
+                ext = base["ext"]
+                path = os.path.join(self.output_dir, "images", f"page_{page_num}_img_{idx+1}.{ext}")
+                img.save(path)
+                content = merged
+                if len(merged)<30:
+                    # LLM 詳述
+                    prompt = (
+                        "請描述這張圖片內容：若是表格請用 Markdown；"
+                        "若是圖表請說明類型、軸、資料與趨勢。"
+                    )
+                    content = self.summarize_image(path, prompt)
+                res.append({"page":page_num,"media_type":"image","source":path,"content":content})
+        except Exception as e:
+            log(f"❌ 圖片抽取失敗：第 {page_num} 頁：{e}")
+            res.append({"page":page_num,"media_type":"image","source":None,"content":f"❌ 失敗：{e}"})
+        return res
+
+
+    def optimized_process(self):
+        """
+        最佳化全流程：
+        1. 標記需要渲染的頁面（表格、OCR 或內含圖片）
+        2. 使用 pdf2image 轉換這些頁面為 PIL.Image
+        3. 依表格頁 / 非表格頁分別處理
+        4. 向量資料庫寫入 & result.json 更新
+        5. 回傳所有結果與旋轉頁碼
+        """
+        t0 = time.time()
+
+        # 1. 開啟 PDF 物件
+        doc = fitz.open(self.pdf_path)
+        pdf = pdfplumber.open(self.pdf_path)
+
+        # 2. 標記哪些頁需要渲染成影像
+        need_img = set()
+        table_pages = []
+        for i, p in enumerate(pdf.pages, start=1):
+            text = p.extract_text() or ""
+            # 如果有表格就標為表格頁
+            if p.extract_tables():
+                table_pages.append(i)
+                need_img.add(i)
+            # 如果文字亂碼或 PyMuPDF 偵測到圖片，也要渲染
+            if self.should_ocr(text) or doc[i-1].get_images(full=True):
+                need_img.add(i)
+
+        # 3. 使用 pdf2image 一次把所有頁面轉為 PIL.Image
+        #    只保留 need_img 裡的頁面，減少記憶體佔用
+        if need_img:
+            log(f"🖼️ 使用 pdf2image 轉換頁面：{sorted(need_img)}")
+            # convert_from_path 會回傳所有頁的 Image list
+            all_images = convert_from_path(self.pdf_path, dpi=self.dpi)
+            # 只取需要的頁面
+            page_images = {i: all_images[i-1] for i in need_img}
+        else:
+            page_images = {}
+
+        # 4. 初始化 result.json
+        result_path = os.path.join(self.output_dir, "result.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump({"results": [], "rotated_pages": []}, f, ensure_ascii=False, indent=2)
+
+        all_results = []
+        rotated_pages = []
+
+        # 5. 逐頁處理
+        for i, page in enumerate(pdf.pages, start=1):
+            log(f"🔍 第 {i} 頁開始處理…")
+
+            # 5.1 取出已由 pdf2image 轉好的影像（若有）
+            img = page_images.get(i)  # 若 i 不在 need_img，img 會是 None
+
+            page_results = []
+
+            # 5.2 如果是表格頁，先做旋轉偵測與表格抽取
+            if i in table_pages and img is not None:
+                # 使用 EasyOCR 文字角度偵測
+                ocr_res = self.reader.readtext(np.array(img))
+                angle = self.detect_rotation_angle_easyocr(ocr_res)
+                if angle == 90:
+                    img = img.rotate(-90, expand=True)
+                    rotated_pages.append(i)
+                    log(f"第 {i} 頁旋轉 90 度")
+
+                # Table-Transformer 偵測表格框
+                inputs = self.processor(images=img, return_tensors="pt").to(self.detect_device)
+                with torch.no_grad():
+                    outputs = self.detector(**inputs)
+                tgt = torch.tensor([img.size[::-1]]).to(self.detect_device)
+                det = self.processor.post_process_object_detection(
+                    outputs, threshold=0.5, target_sizes=tgt
+                )[0]
+
+                # 逐個框抽取表格
+                for idx, box in enumerate(det["boxes"]):
+                    tbl = self.extract_tables(img, i, idx, box)
+                    page_results.append(tbl)
+
+                # 若表格佔比較低，再抽取文字與圖片
+                page_area = img.width * img.height
+                total_table_area = sum(self.calculate_table_area(b) for b in det["boxes"])
+                # 若表格佔比 <50%，取包圍盒上下兩個剩餘區塊，再抽文字與圖片
+                if total_table_area / page_area < 0.5:
+                    # a) 先把所有已偵測到的小表格遮黑
+                    masked_img = self.mask_table_regions(img, det["boxes"])
+
+                    # b) 二次「結構偵測」：用 TableTransformerForObjectDetection 模型
+                    inputs2 = self.proc(images=masked_img, return_tensors="pt")
+                    inputs2 = {k: v.to(self.device) for k, v in inputs2.items()}
+                    with torch.no_grad():
+                        out2 = self.model(**inputs2)
+                    tgt2 = torch.tensor([masked_img.size[::-1]]).to(self.device)
+                    sec = self.proc.post_process_object_detection(
+                        out2, threshold=0.5, target_sizes=tgt2
+                    )[0]
+
+                    # c) 把偵測到的 cell line 結構轉 DataFrame
+                    data2 = []
+                    for lbl, box in zip(sec["labels"], sec["boxes"]):
+                        coords = [round(float(v), 2) for v in box.tolist()]
+                        data2.append({
+                            "label": self.model.config.id2label[lbl.item()],
+                            "x1": coords[0], "y1": coords[1],
+                            "x2": coords[2], "y2": coords[3]
+                        })
+                    df2 = pd.DataFrame(data2)
+
+                    # d) 如果有偵測到「table column」欄位，表示這塊仍是表格 → 再 extract_tables
+                    col_boxes = df2[df2.label == 'table column'][['x1', 'x2']].to_numpy()
+                    if len(col_boxes) > 0:
+                        base_idx = len(det["boxes"])
+                        for j, box2 in enumerate(sec["boxes"]):
+                            page_results.append(
+                                self.extract_tables(masked_img, i, base_idx + j, box2)
+                            )
+                    else:
+                        # e) 否則當作純文字區域，直接 OCR/原文抽取
+                        page_results.append(self.extract_texts(page, i, masked_img))
+
+                    # f) 圖片部分仍用原圖抽取
+                    page_results.extend(self.extract_imgs(doc, i))
+
+            else:
+                # 5.3 非表格頁：直接抽文字 & 圖片
+                log("非表格頁，提取文字和圖片")
+                page_results.append(self.extract_texts(page, i, img))
+                page_results.extend(self.extract_imgs(doc, i))
+
+            # 6. 寫入向量資料庫 & 更新 result.json
+            for item in page_results:
+                if not item["content"]:
+                    continue
+                self.vectorstore.add(
+                    content=item["content"],
+                    page=item["page"],
+                    document_id=self.knowledge_id,
+                    media_type=item["media_type"],
+                    title=self.knowledge_title,
+                    source=item["source"]
+                )
+
+            with open(result_path, "r+", encoding="utf-8") as f:
+                data = json.load(f)
+                data["results"].extend(page_results)
+                data["rotated_pages"] = rotated_pages
+                f.seek(0)
+                f.truncate()
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            all_results.extend(page_results)
+            log(f"✅ 第 {i} 頁處理完畢，寫入 {len(page_results)} 筆；累計旋轉頁：{rotated_pages}")
+
+        # 7. 清理、關閉資源
+        pdf.close()
+        doc.close()
+        log(f"全部完成，用時 {time.time()-t0:.1f}s，總記錄數 {len(all_results)}")
+
+        return all_results, rotated_pages
