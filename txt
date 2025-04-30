@@ -1,64 +1,51 @@
-    def __init__(self, pdf_path, vectorstore="chroma_user_db", output_dir="media", model_name="gemma3:27b", knowledge_id=None, knowledge_title="未知文件",cid_threshold=20):
-        self.pdf_path = pdf_path
-        self.file_stem = os.path.splitext(os.path.basename(pdf_path))[0]
-        self.output_dir = os.path.join(output_dir,"extract_data",self.file_stem)
-        self.model_name = model_name
-        self.knowledge_id = knowledge_id
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # 🔽 讓 OCR reader 用 GPU
-        self.reader = Reader(['ch_tra', 'en'], gpu=(self.device=="cuda"))
-        # 🔽 Detector, Model 也都放上 GPU
-        self.detector = AutoModelForObjectDetection.from_pretrained("microsoft/table-transformer-detection", revision="no_timm").to(self.device)
-        self.processor = AutoProcessor.from_pretrained("microsoft/table-transformer-detection", revision="no_timm")
-        self.proc = AutoImageProcessor.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all")
-        self.proc.size['shortest_edge'] = 800
-        self.model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition-v1.1-all").to(self.device)
-        self.cid_threshold = cid_threshold
-        self.dpi = 300
-        self.vectorstore = VectorStoreHandler(db_path=vectorstore)
-        self.knowledge_title = knowledge_title
-     
-        os.makedirs(self.output_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.output_dir, "images"), exist_ok=True)
-        os.makedirs(os.path.join(self.output_dir, "tables"), exist_ok=True)
-        os.makedirs(os.path.join(self.output_dir, "ocr_fallback"), exist_ok=True)
+import pandas as pd
 
+xl = pd.ExcelFile("你的檔案.xlsx")
+sheet_name = xl.sheet_names[0]
 
-    def extract_tables(self, img, page_num, tbl_idx, box, media_type):
-        try:
-            # ...（前面程式同原本）
-            inputs = self.proc(images=tbl_crop, return_tensors="pt")
-            # 🔽 保證 inputs tensor 都在 self.device
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            with torch.no_grad():
-                out = self.model(**inputs)
-            tgt_sz  = torch.tensor([tbl_crop.size[::-1]]).to(self.device)
-            results = self.proc.post_process_object_detection(out, threshold=0.5, target_sizes=tgt_sz)[0]
+# 讀取兩層欄位（主 + 副）→ 第 3 與第 4 列（index=2,3）
+df = xl.parse(sheet_name=sheet_name, header=[2, 3])
 
+# ✅ 抓取月份（第2列第1欄，index=1, col=0）
+month_info = xl.parse(sheet_name=sheet_name, nrows=2, header=None).iloc[1, 0]
+month_info = str(month_info).strip()
 
-                if angle == 90:
-                    img = img.rotate(-90, expand=True)
-                    rotated_pages.append(i)
-                    log(f"第 {i} 页旋轉 90 度")
+# ✅ 合併欄位名稱為單層（忽略空主欄位）
+new_cols = []
+for major, minor in df.columns:
+    if pd.isna(major) or str(major).strip() == "":
+        new_cols.append(str(minor).strip())
+    else:
+        new_cols.append(f"{str(major).strip()}_{str(minor).strip()}")
 
-                # 🔽 使用 GPU
-                inputs = self.processor(images=img, return_tensors="pt")
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    outputs = self.detector(**inputs)
-                target_sizes = torch.tensor([img.size[::-1]]).to(self.device)
-                det = self.processor.post_process_object_detection(
-                    outputs, threshold=0.5, target_sizes=target_sizes
-                )[0]
+df.columns = new_cols
 
-                # ...（略：其餘部分同理，如下）
-                masked_img = self.mask_table_regions(img, det["boxes"])
-                inputs2 = self.proc(images=masked_img, return_tensors="pt")
-                inputs2 = {k: v.to(self.device) for k, v in inputs2.items()}
-                with torch.no_grad():
-                    out2 = self.model(**inputs2)
-                tgt2 = torch.tensor([masked_img.size[::-1]]).to(self.device)
-                sec = self.proc.post_process_object_detection(
-                    out2, threshold=0.5, target_sizes=tgt2
-                )[0]
-                # ...（略）
+# ✅ 取得關鍵欄位名
+code_col = next((c for c in df.columns if "科目代號" in c), None)
+subject_col = next((c for c in df.columns if "會計科目" in c), None)
+
+chunks = []
+
+# ✅ 遍歷每列，針對每一個「券商_借方餘額」建立語意句
+for _, row in df.iterrows():
+    code = row.get(code_col, "")
+    subject = row.get(subject_col, "")
+    common_prefix = f"{month_info},科目代號{code},{new_cols[1]}為{subject}"
+
+    for col in df.columns:
+        if col in [code_col, subject_col]:
+            continue
+        val = row[col]
+        if pd.isna(val) or str(val).strip() == "":
+            val = "空"
+        chunk_text = f"{common_prefix}, {col}為{val}"
+        chunks.append({
+            "content": chunk_text,
+            "media_type": "excel",
+            "source": sheet_name,
+            "page": 1
+        })
+
+# ✅ 檢查前幾筆
+for c in chunks[:3]:
+    print(c["content"])
