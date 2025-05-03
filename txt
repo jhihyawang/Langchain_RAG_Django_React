@@ -1,51 +1,16 @@
-import pandas as pd
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 
-xl = pd.ExcelFile("你的檔案.xlsx")
-sheet_name = xl.sheet_names[0]
+artifacts_path = "/Users/joy/.cache/docling/models"
+pipeline_options = PdfPipelineOptions(artifacts_path=artifacts_path)
+converter = DocumentConverter(
+    format_options={
+        InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+    }
+)
 
-# 讀取兩層欄位（主 + 副）→ 第 3 與第 4 列（index=2,3）
-df = xl.parse(sheet_name=sheet_name, header=[2, 3])
-
-# ✅ 抓取月份（第2列第1欄，index=1, col=0）
-month_info = xl.parse(sheet_name=sheet_name, nrows=2, header=None).iloc[1, 0]
-month_info = str(month_info).strip()
-
-# ✅ 合併欄位名稱為單層（忽略空主欄位）
-new_cols = []
-for major, minor in df.columns:
-    if pd.isna(major) or str(major).strip() == "":
-        new_cols.append(str(minor).strip())
-    else:
-        new_cols.append(f"{str(major).strip()}_{str(minor).strip()}")
-
-df.columns = new_cols
-
-# ✅ 取得關鍵欄位名
-code_col = next((c for c in df.columns if "科目代號" in c), None)
-subject_col = next((c for c in df.columns if "會計科目" in c), None)
-
-chunks = []
-
-# ✅ 遍歷每列，針對每一個「券商_借方餘額」建立語意句
-for _, row in df.iterrows():
-    code = row.get(code_col, "")
-    subject = row.get(subject_col, "")
-    common_prefix = f"{month_info},科目代號{code},{new_cols[1]}為{subject}"
-
-    for col in df.columns:
-        if col in [code_col, subject_col]:
-            continue
-        val = row[col]
-        if pd.isna(val) or str(val).strip() == "":
-            val = "空"
-        chunk_text = f"{common_prefix}, {col}為{val}"
-        chunks.append({
-            "content": chunk_text,
-            "media_type": "excel",
-            "source": sheet_name,
-            "page": 1
-        })
-
-# ✅ 檢查前幾筆
-for c in chunks[:3]:
-    print(c["content"])
+# 範例：轉換 PDF 為 Markdown
+source = "/Users/joy/Downloads/20240612112853743514.pdf"
+result = converter.convert(source)
+print(result.document.export_to_markdown())
