@@ -1,16 +1,28 @@
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
+import os
 
+# 指定模型資料夾與 PDF 檔案路徑
 artifacts_path = "/Users/joy/.cache/docling/models"
-pipeline_options = PdfPipelineOptions(artifacts_path=artifacts_path)
+pdf_path = "/mnt/data/20240612112853743514.pdf"
+
+# 設定 OCR-only 模式
+pipeline_options = PdfPipelineOptions(
+    artifacts_path=artifacts_path,
+    ocr_only=True
+)
+
+# 建立轉換器並轉換 PDF
 converter = DocumentConverter(
     format_options={
         InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
     }
 )
 
-# 範例：轉換 PDF 為 Markdown
-source = "/Users/joy/Downloads/20240612112853743514.pdf"
-result = converter.convert(source)
-print(result.document.export_to_markdown())
+# 執行轉換
+result = converter.convert(pdf_path)
+
+# 匯出 markdown
+markdown_output = result.document.export_to_markdown()
+markdown_output[:3000]  # 只顯示前 3000 字元作為驗證輸出
