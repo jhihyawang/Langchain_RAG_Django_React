@@ -1,135 +1,41 @@
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    EasyOcrOptions,
-    TableFormerMode,
-)
-from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
-from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
-from docling.document_converter import DocumentConverter, PdfFormatOption
-import pandas as pd
-from pathlib import Path
-import ollama
-import os
+import re
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-def summarize_image_with_llm(image_path, prompt="請詳細描述這張圖片的內容，若是圖表請說明其趨勢與關鍵數據"):
-    system_prompt = (
-        "你是一位針對圖片進行分析與內容還原的助手，請回傳純內容摘要。"
-        "若是圖片中包含文字請盡可能還原。"
-        "若是圖表，請指出圖表類型、各軸意義、趨勢與關鍵數據。"
+def hybrid_chunk_markdown(md_text, chunk_size=500, chunk_overlap=100):
+    # 切分為段落（包含表格、文字）
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=[
+            "```", "\n### ", "\n## ", "\n# ",
+            "\n- ", "\n* ", "\n1. ", "\n> ",
+            "\n\n", "\n", ".", "!", "?", " "
+        ]
     )
+    sections = splitter.split_text(md_text)
 
-    try:
-        response = ollama.chat(
-            model="gemma3:4b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt, "images": [image_path]}
-            ]
-        )
-        return response["message"]["content"]
-    except Exception as e:
-        return f"❌ 圖像摘要錯誤: {str(e)}"
-
-def process_pdf(pdf_path):
-    """
-    Process PDF documents :
-    - Converts PDFs into structured documents.
-    - Extracts image annotations.
-    - Exports a Markdown file with custom image placeholders.
-    - Post-processes the Markdown to replace placeholders with actual annotations.
-    """
-    # Configure PDF processing pipeline options:
-    # - Scale images (e.g., 2.0), enable local service for image annotation,
-    # - Generate image descriptions using the specified VLM
-    # - Disable separate picture image generation.
-    pipeline_options = PdfPipelineOptions(
-        images_scale=2.0,
-        enable_remote_services=False,
-        do_picture_description=False,
-        generate_page_images = True,
-        generate_picture_images=True,
-        generate_table_images=True,
-        do_table_structure = True,
-        artifacts_path = "C://Users//psc.pt80030//.cache//docling//models",
-        do_ocr = True,
-        ocr_options = EasyOcrOptions(
-            force_full_page_ocr=True,
-            lang = ["ch_tra","en"]
-            )
-    )
-    pipeline_options.table_structure_options.do_cell_matching = True
-    pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
-    pipeline_options.do_code_enrichment = True
-    pipeline_options.do_formula_enrichment = True
-
-    # Create a DocumentConverter with the specified PDF format options
-    doc_converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(
-                backend=DoclingParseDocumentBackend, #docling_parse_v1
-                pipeline_options=pipeline_options
-            )}
-    )
-    # Convert the PDF to a structured document object
-    conv_res = doc_converter.convert(
-        source=pdf_path,
-    )
-
-    doc_filename = conv_res.input.file.stem
-    output_dir_tables = Path(f"media/{doc_filename}/tables")
-    output_dir_tables.mkdir(parents=True, exist_ok=True)
-    output_dir_images = Path(f"media/{doc_filename}/images")
-    output_dir_images.mkdir(parents=True, exist_ok=True)
-    # Save markdown of page 
-    md_pages = []
-        
-    for page_no, page in conv_res.document.pages.items():
-        summaries = []
-        image_url = []
-        #export page content as markdown
-        markdown = conv_res.document.export_to_markdown(page_no=page_no)   
-        # Save images of figures and tables
-        table_counter = 0
-        picture_counter = 0
-        for element, _level in conv_res.document.iterate_items(page_no=page_no):
-            if isinstance(element, TableItem):
-                table_counter += 1
-                element_image_filename = (
-                    output_dir_tables / f"page_{page_no}_table_{table_counter}.png"
-                )
-                with element_image_filename.open("wb") as fp:
-                    element.get_image(conv_res.document).save(fp, "PNG")
-
-            if isinstance(element, PictureItem):
-                picture_counter += 1
-                element_image_filename = (
-                    output_dir_images / f"page_{page_no}_img_{picture_counter}.png"
-                )
-                with element_image_filename.open("wb") as fp:
-                    element.get_image(conv_res.document).save(fp, "PNG")
-                image_url.append(element_image_filename)
-                # 使用 LLM 進行摘要
-                summary = summarize_image_with_llm(element_image_filename)
-                summaries.append(summary)
-                
-        # 依序替換每個 <!-- image --> 為對應的摘要
-        for desc in summaries:
-            markdown = markdown.replace("<!-- image -->", desc, 1)
-        markdown = markdown.replace("<!-- image -->", "（未能成功替換圖片說明）")
-
-        md_pages.append({
-            "page": page_no,
-            "content": markdown,
-            "image_urls": image_url
-        })
-    return md_pages
+    # 將表格與上下文合併（Hybrid）
+    chunks = []
+    buffer = ""
+    for section in sections:
+        if "|" in section and "---" in section:  # 偵測表格
+            if buffer:
+                chunks.append(buffer + "\n" + section)
+                buffer = ""
+            else:
+                chunks.append(section)
+        else:
+            if len(buffer) + len(section) < chunk_size:
+                buffer += "\n" + section
+            else:
+                chunks.append(buffer)
+                buffer = section
+    if buffer:
+        chunks.append(buffer)
+    
+    return chunks
 
 
-for page in result:
-    print(f"page: {page['page']}")
-    for img in page.get("image", []):
-        print(f"image: {img}")
-    print("-" * 40)
-    print(page["content"])
-    print("-" * 40)
+chunks = hybrid_chunk_markdown(your_markdown_text)
+for i, chunk in enumerate(chunks):
+    print(f"\n--- Chunk {i+1} ---\n{chunk}")
