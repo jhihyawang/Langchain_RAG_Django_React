@@ -1,29 +1,45 @@
-def correction_direction(self):
-    log(f"📝 檢查是否需要旋轉：{self.knowledge_title}...")
+import shutil
 
-    # 一次性開啟文件
-    with pdfplumber.open(self.pdf_path) as pdf:
-        table_pages = [i + 1 for i, p in enumerate(pdf.pages) if p.extract_tables()]
+def pdf_rotation(self):
+    # Step 1: 複製檔案做判斷與旋轉
+    temp_path = self.pdf_path + ".rotation_check.pdf"
+    shutil.copy(self.pdf_path, temp_path)
 
-    # 集中式開啟 fitz
-    doc = fitz.open(self.pdf_path)
-    rotated_pages = []
+    log(f"📄 複製 PDF 檔案至：{temp_path} 用於旋轉處理")
 
-    for i in table_pages:
-        log(f"🔍 第 {i} 頁處理中...")
+    # 改變 self.pdf_path 指向複製的檔案
+    original_path = self.pdf_path
+    self.pdf_path = temp_path
 
-        # 僅此處產生圖像（避免無意義的全部轉換）
-        page = doc.load_page(i - 1)
-        pix = page.get_pixmap(dpi=200)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # Step 2: 偵測旋轉頁面
+    rotated_pages = self.correction_direction()
+    if not rotated_pages:
+        log("✅ 無需旋轉頁面")
+        os.remove(temp_path)  # 清除複製檔
+        self.pdf_path = original_path
+        return False
 
-        # OCR 偵測旋轉角度
-        ocr_result = self.reader.readtext(np.array(img))
-        angle = self.detect_rotation_angle_easyocr(ocr_result)
+    # Step 3: 對複製檔案進行旋轉
+    log(f"🔄 對複製檔案進行旋轉：{temp_path}")
+    try:
+        doc = fitz.open(temp_path)
+        for pg in rotated_pages:
+            page = doc[pg - 1]
+            page.set_rotation((page.rotation + 90) % 360)
 
-        if angle == 90:
-            rotated_pages.append(i)
-            log(f"➡️ 第 {i} 頁需旋轉 90 度")
+        rotated_output = original_path + ".rotated.pdf"
+        doc.save(rotated_output, garbage=4, deflate=True)
+        doc.close()
 
-    doc.close()
-    return rotated_pages
+        # Step 4: 替換原始檔案
+        os.replace(rotated_output, original_path)
+        log(f"✅ 成功旋轉並更新原始檔案：{original_path}")
+    except Exception as e:
+        log(f"❌ 旋轉過程中發生錯誤：{e}")
+    finally:
+        # 總是清除暫存檔
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        self.pdf_path = original_path
+
+    return True
