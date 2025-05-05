@@ -1,8 +1,5 @@
-rotated_path = rotator.rotate()
+from PIL import Image
+import numpy as np
 
-# 若有旋轉：覆蓋原始檔案
-if rotated_path and rotated_path != pdf_path:
-    os.replace(rotated_path, pdf_path)
-    final_pdf_path = pdf_path
-else:
-    final_pdf_path = pdf_path
+img = Image.open(element_image_filename)
+ocr_result = self.reader.readtext(np.array(img))
