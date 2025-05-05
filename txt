@@ -1,18 +1,1 @@
-def pdf_rotation(self):
-    rotated_pages = self.correction_direction()
-    if not rotated_pages:
-        print("✅ 無需旋轉頁面")
-        return False
-
-    log(f"🔄 開始旋轉 PDF：{self.knowledge_title}...")
-    doc = fitz.open(self.pdf_path)
-    for pg in rotated_pages:
-        page = doc[pg - 1]
-        page.set_rotation((page.rotation + 90) % 360)
-
-    temp_path = self.pdf_path + ".rotated"
-    doc.save(temp_path)
-    doc.close()
-    os.replace(temp_path, self.pdf_path)
-    log(f"✅ 文件旋轉完成：{self.knowledge_title}")
-    return True
+img_url.as_posix()
