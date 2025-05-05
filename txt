@@ -1,1 +1,69 @@
-img_url.as_posix()
+@background(schedule=0)
+def process_pdf_background(knowledge_id):
+    try:
+        knowledge = Knowledge.objects.get(id=knowledge_id)
+
+        if knowledge.processing_status != 'pending':
+            return
+
+        knowledge.processing_status = 'processing'
+        knowledge.save(update_fields=['processing_status'])
+
+        pdf_path = knowledge.file.path
+
+        # 1️⃣ 建立旋轉判斷副本
+        rotation_input = pdf_path + ".rotation_check.pdf"
+        shutil.copy(pdf_path, rotation_input)
+
+        # 2️⃣ 進行旋轉處理，返回新的 pdf_path
+        rotator = PdfRotator(pdf_path=rotation_input, knowledge_id=knowledge_id, knowledge_title=knowledge.title)
+        rotated_path = rotator.rotate()
+
+        # 3️⃣ 根據是否有旋轉決定最終輸入路徑
+        if rotated_path:
+            final_pdf_path = rotated_path
+        else:
+            final_pdf_path = pdf_path
+
+        # 4️⃣ 執行內容提取（針對最終 PDF）
+        processor = PdfProcessor(pdf_path=final_pdf_path, knowledge_id=knowledge_id, knowledge_title=knowledge.title)
+        success = processor.process_with_docling()
+
+        if not success:
+            knowledge.processing_status = 'error'
+            knowledge.save(update_fields=['processing_status'])
+            return
+
+        # 5️⃣ 更新 DB 狀態與內容
+        vectorstore = VectorStoreHandler(db_path="chroma_user_db")
+        chunks = vectorstore.list(knowledge_id)
+        knowledge.content = chunks[0]['content'] if chunks else ""
+        knowledge.chunk = len(chunks)
+        knowledge.processing_status = 'done'
+        knowledge.save(update_fields=['content', 'chunk', 'processing_status'])
+
+        # 🧹 清除中繼副本檔案
+        if os.path.exists(rotation_input):
+            os.remove(rotation_input)
+
+    except Exception as e:
+        knowledge.processing_status = 'error'
+        knowledge.save(update_fields=['processing_status'])
+        print(f"背景處理失敗：{e}")
+
+
+
+def rotate(self):
+    rotated_pages = self.correction_direction()
+    if rotated_pages:
+        doc = fitz.open(self.pdf_path)
+        for pg in rotated_pages:
+            doc[pg - 1].set_rotation((doc[pg - 1].rotation + 90) % 360)
+
+        rotated_output = self.pdf_path + ".rotated.pdf"
+        doc.save(rotated_output, garbage=4, deflate=True, clean=True)
+        doc.close()
+
+        return rotated_output  # ✅ 回傳旋轉後檔案路徑
+    else:
+        return None  # ✅ 無旋轉，明確回傳 None
