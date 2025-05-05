@@ -1,3 +1,8 @@
+result = []
 for page_index, page in enumerate(doc.pages):
     page_number = page_index + 1
+    markdown_blocks = []
+
+    # ✅ 正確取得 markdown
     page_content = page.export_to_markdown()
+    markdown_blocks.append(page_content)
