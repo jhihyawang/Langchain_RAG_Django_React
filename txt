@@ -1,41 +1,29 @@
-import re
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+def correction_direction(self):
+    log(f"📝 檢查是否需要旋轉：{self.knowledge_title}...")
 
-def hybrid_chunk_markdown(md_text, chunk_size=500, chunk_overlap=100):
-    # 切分為段落（包含表格、文字）
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=[
-            "```", "\n### ", "\n## ", "\n# ",
-            "\n- ", "\n* ", "\n1. ", "\n> ",
-            "\n\n", "\n", ".", "!", "?", " "
-        ]
-    )
-    sections = splitter.split_text(md_text)
+    # 一次性開啟文件
+    with pdfplumber.open(self.pdf_path) as pdf:
+        table_pages = [i + 1 for i, p in enumerate(pdf.pages) if p.extract_tables()]
 
-    # 將表格與上下文合併（Hybrid）
-    chunks = []
-    buffer = ""
-    for section in sections:
-        if "|" in section and "---" in section:  # 偵測表格
-            if buffer:
-                chunks.append(buffer + "\n" + section)
-                buffer = ""
-            else:
-                chunks.append(section)
-        else:
-            if len(buffer) + len(section) < chunk_size:
-                buffer += "\n" + section
-            else:
-                chunks.append(buffer)
-                buffer = section
-    if buffer:
-        chunks.append(buffer)
-    
-    return chunks
+    # 集中式開啟 fitz
+    doc = fitz.open(self.pdf_path)
+    rotated_pages = []
 
+    for i in table_pages:
+        log(f"🔍 第 {i} 頁處理中...")
 
-chunks = hybrid_chunk_markdown(your_markdown_text)
-for i, chunk in enumerate(chunks):
-    print(f"\n--- Chunk {i+1} ---\n{chunk}")
+        # 僅此處產生圖像（避免無意義的全部轉換）
+        page = doc.load_page(i - 1)
+        pix = page.get_pixmap(dpi=200)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        # OCR 偵測旋轉角度
+        ocr_result = self.reader.readtext(np.array(img))
+        angle = self.detect_rotation_angle_easyocr(ocr_result)
+
+        if angle == 90:
+            rotated_pages.append(i)
+            log(f"➡️ 第 {i} 頁需旋轉 90 度")
+
+    doc.close()
+    return rotated_pages
