@@ -1,73 +1,18 @@
-import os
-import fitz
-import shutil
-from background_task import background
-from django.conf import settings
-from common.modules.processor.pdf_processor_docling import PdfProcessor
-from common.modules.processor.pdf_rotator import PdfRotator
-from common.modules.processor.vector_store import VectorStoreHandler
-from enterprise_assistant.models import Knowledge
+def pdf_rotation(self):
+    rotated_pages = self.correction_direction()
+    if not rotated_pages:
+        print("✅ 無需旋轉頁面")
+        return False
 
-@background(schedule=0)
-def process_pdf_background(knowledge_id):
-    try:
-        knowledge = Knowledge.objects.get(id=knowledge_id)
+    log(f"🔄 開始旋轉 PDF：{self.knowledge_title}...")
+    doc = fitz.open(self.pdf_path)
+    for pg in rotated_pages:
+        page = doc[pg - 1]
+        page.set_rotation((page.rotation + 90) % 360)
 
-        # 若不是 pending 狀態，跳過
-        if knowledge.processing_status != 'pending':
-            return
-
-        # 標記為處理中
-        knowledge.processing_status = 'processing'
-        knowledge.save(update_fields=['processing_status'])
-
-        pdf_path = knowledge.file.path
-
-        # --- 1. 建立複製檔案做旋轉判斷 ---
-        temp_path = pdf_path + ".rotation_check.pdf"
-        shutil.copy(pdf_path, temp_path)
-        rotator = PdfRotator(pdf_path=temp_path, knowledge_id=knowledge_id, knowledge_title=knowledge.title)
-        rotated_pages = rotator.correction_direction()
-
-        if rotated_pages:
-            try:
-                doc = fitz.open(pdf_path)
-                for pg in rotated_pages:
-                    p = doc[pg - 1]
-                    p.set_rotation((p.rotation + 90) % 360)
-        
-                rotated_output = pdf_path + ".rotated.tmp.pdf"
-                doc.save(rotated_output, garbage=4, deflate=True)
-                doc.close()
-        
-                os.replace(rotated_output, pdf_path)
-                print(f"✅ 完成旋轉並覆寫原始檔案：{pdf_path}")
-        
-            except Exception as e:
-                print(f"❌ 無法旋轉 PDF：{e}")
-
-        # 清除暫存檔
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-        # --- 2. PDF 正文處理（不論有無旋轉都處理） ---
-        processor = PdfProcessor(pdf_path=pdf_path, knowledge_id=knowledge_id, knowledge_title=knowledge.title)
-        success = processor.process_with_docling()
-
-        if not success:
-            knowledge.processing_status = 'error'
-            knowledge.save(update_fields=['processing_status'])
-            return
-
-        # --- 3. 更新資料庫與向量庫狀態 ---
-        vectorstore = VectorStoreHandler(db_path="chroma_user_db")
-        chunks = vectorstore.list(knowledge_id)
-        knowledge.content = chunks[0]['content'] if chunks else ""
-        knowledge.chunk = len(chunks)
-        knowledge.processing_status = 'done'
-        knowledge.save(update_fields=['content', 'chunk', 'processing_status'])
-
-    except Exception as e:
-        knowledge.processing_status = 'error'
-        knowledge.save(update_fields=['processing_status'])
-        print(f"❌ 背景處理失敗：{e}")
+    temp_path = self.pdf_path + ".rotated"
+    doc.save(temp_path)
+    doc.close()
+    os.replace(temp_path, self.pdf_path)
+    log(f"✅ 文件旋轉完成：{self.knowledge_title}")
+    return True
