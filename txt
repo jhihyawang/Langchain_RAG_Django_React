@@ -1,33 +1,22 @@
-import gc
-import os
-from PIL import Image
+def cleanup_page_resources(self, local_vars: dict):
+    import gc
+    import torch
+    from PIL import Image
 
-class PdfProcessor:
-    ...
-    def cleanup_page_resources(self, local_vars: dict):
-        """
-        清理單頁處理後的資源：圖像、暫存變數、記憶體等。
-        請於每頁處理結尾呼叫：self.cleanup_page_resources(locals())
-        """
-        keys_to_delete = ["conv_res", "page", "image", "summary", "element", "element_image_filename", "df", "sentences"]
+    keys_to_delete = ["conv_res", "page", "image", "summary", "element", "element_image_filename", "df", "sentences"]
+    for k in keys_to_delete:
+        if k in local_vars:
+            val = local_vars[k]
+            try:
+                if isinstance(val, Image.Image):
+                    val.close()
+                del val
+            except Exception as e:
+                print(f"⚠️ 無法清除變數 {k}: {e}")
 
-        for k in keys_to_delete:
-            if k in local_vars:
-                val = local_vars[k]
-                try:
-                    if isinstance(val, Image.Image):
-                        val.close()  # 關閉 PIL 圖片
-                    del val
-                except Exception as e:
-                    print(f"⚠️ 無法清除變數 {k}: {e}")
+    gc.collect()  # 🔄 釋放 Python 記憶體
 
-        gc.collect()  # 強制執行垃圾回收
-
-        # 額外可選：清除不需要的圖片檔案
-        # if "element_image_filename" in local_vars:
-        #     path = str(local_vars["element_image_filename"])
-        #     if os.path.exists(path):
-        #         os.remove(path)
-
-
-self.cleanup_page_resources(locals())
+    # 🧠 釋放 CUDA/GPU 記憶體
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
