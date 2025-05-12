@@ -1,56 +1,53 @@
-from typing import List
-import pandas as pd
+    def table_to_sentences(self, df: pd.DataFrame) -> List[str]:
+        sentences = []
+        if df.empty:
+            return sentences
 
-def table_to_sentences(self,table: TableItem) -> List[str]:
-    """
-    根據 TableItem 中的表格內容產生語意句清單。
-    """
-    df = table.export_to_dataframe()
-    if df.empty:
-        return []
+        # 多層欄位（MultiIndex）處理為單層欄位
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ["-".join([str(level) for level in col if str(level).strip()]) for col in df.columns.values]
 
-    def is_vertical(df: pd.DataFrame) -> bool:
-        # 判斷是否為左側直向表頭（第一欄是標題）
-        first_col = df.iloc[:, 0]
-        score = 0
-        for val in first_col[: min(5, len(first_col))]:
-            if isinstance(val, str) and len(val) <= 10 and not any(char.isdigit() for char in val):
-                score += 1
-        return score >= 0.6 * min(5, len(first_col))
+        n_rows, n_cols = df.shape
 
-    orientation = "vertical" if is_vertical(df) else "horizontal"
-    sentences = []
+        # 偵測橫向表或縱向表
+        vertical_score = 0
+        if n_cols >= 2:
+            first_col = df.iloc[:, 0]
+            for val in first_col[:min(5, len(first_col))]:
+                if isinstance(val, str) and len(val) <= 15 and not any(char.isdigit() for char in val):
+                    vertical_score += 1
+        orientation = "vertical" if vertical_score >= 0.6 * min(5, len(df)) else "horizontal"
 
-    if orientation == "horizontal":
-        for idx, row in df.iterrows():
-            parts = []
-            for col, val in row.items():
-                if pd.notna(val) and str(val).strip():
-                    parts.append(f"{col.strip()}為{str(val).strip()}")
-            if parts:
-                sentences.append("，".join(parts) + "。")
+        # 特殊結構：交叉表（欄為年份，列為部門/項目）
+        if orientation == "horizontal" and any(re.search(r"20[0-9]{2}|19[0-9]{2}", col) for col in df.columns[1:]):
+            for _, row in df.iterrows():
+                row_key = str(row[0]).strip()
+                for i in range(1, len(row)):
+                    year = str(df.columns[i]).strip()
+                    val = str(row[i]).strip()
+                    if val:
+                        sentences.append(f"{row_key}在{year}年為{val}。")
+            return sentences
 
-    else:  # vertical
-        headers = df.columns.tolist()
-        for row in df.itertuples(index=False):
-            key = str(row[0]).strip()
-            for i in range(1, len(row)):
-                val = row[i]
-                if pd.notna(val) and str(val).strip():
-                    col_name = headers[i]
-                    sentences.append(f"{key}的{col_name}為{str(val).strip()}。")
+        # 一般橫向表格：欄位名在上，一列為一筆資料
+        if orientation == "horizontal":
+            for _, row in df.iterrows():
+                parts = [f"{str(col).strip()}: {str(val).strip()}" for col, val in zip(df.columns, row) if pd.notna(val) and str(val).strip() != ""]
+                if parts:
+                    sentences.append("；".join(parts) + "。")
 
-    return sentences
+        # 一般縱向表格：欄位名在左側
+        else:
+            header = df.columns.tolist()
+            for row in df.itertuples(index=False):
+                key = str(row[0]).strip()
+                parts = []
+                for i in range(1, len(row)):
+                    value = row[i]
+                    if pd.notna(value) and str(value).strip():
+                        col_name = header[i]
+                        parts.append(f"{key} - {col_name}: {str(value).strip()}")
+                if parts:
+                    sentences.append("；".join(parts) + "。")
 
-
-for table in conv_res.document.tables:
-    sentences = self.table_to_sentences(table)
-    for s in sentences:
-        vectorstore.add(
-            content=s,
-            page=page_no,
-            document_id=doc_id,
-            media_type="table",
-            title=title,
-            source=image_path
-        )
+        return sentences
