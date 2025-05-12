@@ -1,1 +1,3 @@
+import re
 cleaned = re.sub(r"\s+", "", chunk)
+print(cleaned)
