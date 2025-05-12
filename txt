@@ -1,40 +1,19 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from FlagEmbedding import FlagReranker
+from docling.document_converter import DocumentConverter  
+from docling_core.experimental.serializer.markdown import MarkdownDocSerializer
+from docling_core.types.doc import GroupLabel
 
-# 載入一次就好，可改為 class 層級屬性或 singleton
-reranker = FlagReranker('BAAI/bge-reranker-base', use_fp16=True)
+converter = DocumentConverter()
+doc = converter.convert("/Path/To/My/Spreadsheet.xlsx").document
 
-class QueryAPIView(APIView):
-    def post(self, request):
-        query = request.data.get("query", "")
-        document_id = request.data.get("document_id")  # optional
+serializer = MarkdownDocSerializer(doc=doc)
+sheet_md = [
+    serializer.serialize(item=item).text 
+    for item in doc.groups 
+    if item.label == GroupLabel.SECTION
+]
+for i, md in enumerate(sheet_md):
+    print(f"--- Sheet {i+1} ---\n")
+    print(md)
 
-        if not query:
-            return Response({"error": "請輸入問題"}, status=400)
-
-        # 🔍 Step 1: 原始向量檢索
-        if document_id:
-            results = vectorstore.similarity_search(query, k=10, filter={"document_id": document_id})
-        else:
-            results = vectorstore.similarity_search(query, k=10)
-
-        if not results:
-            return Response({"answer": "找不到相關內容。"})
-
-        # 📊 Step 2: 用 reranker 重新排序
-        texts = [doc.page_content for doc in results]
-        scores = reranker.compute_score(query, texts)
-        reranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
-
-        top_chunks = [doc for doc, _ in reranked[:5]]  # 取前 5 段
-        context = "\n".join([doc.page_content for doc in top_chunks])
-
-        # 💬 Step 3: 呼叫 LLM 回答（你可用 OpenAI / Ollama / ChatCompletion）
-        answer = llm.generate(context + "\n\n" + query)
-
-        return Response({
-            "answer": answer,
-            "chunks": [doc.page_content for doc in top_chunks],  # 可選回傳
-            "scores": [float(s) for _, s in reranked[:5]]
-        })
+tables = [item for item in doc.groups if item.label == GroupLabel.SECTION]
+dfs = [t.export_to_dataframe() for t in tables]
