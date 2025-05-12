@@ -1,7 +1,7 @@
-# ✅ 假設 conv_res 已經從 doc_converter.convert(...) 執行完畢
-# 此段程式將逐一取出每張表格，使用 table_to_sentences 將其轉為語意句並印出
+# 直接顯示每個表格的 DataFrame 並加上語意句欄位，不使用 ace_tools
 
 from typing import List
+import pandas as pd
 
 def table_to_sentences(df: pd.DataFrame, orientation: str = "auto") -> List[str]:
     def is_vertical(df):
@@ -37,21 +37,18 @@ def table_to_sentences(df: pd.DataFrame, orientation: str = "auto") -> List[str]
 
     return sentences
 
-# 🔍 逐一處理每張表格，轉為語意句並列印
-all_table_sentences = []
-
+# 顯示每張表格的原始 df 加上語意句欄位
 for table_ix, table in enumerate(conv_res.document.tables):
-    table_df: pd.DataFrame = table.export_to_dataframe()
-    sentences = table_to_sentences(table_df)
-    all_table_sentences.append({
-        "table_index": table_ix + 1,
-        "sentences": sentences
-    })
+    df = table.export_to_dataframe()
+    orientation = "vertical" if df.shape[1] > df.shape[0] else "horizontal"
+    sentences = table_to_sentences(df, orientation=orientation)
 
-# 展開成表格顯示
-flat_records = []
-for entry in all_table_sentences:
-    for s in entry["sentences"]:
-        flat_records.append({"Table #": entry["table_index"], "Sentence": s})
-
-import ace_tools as tools; tools.display_dataframe_to_user(name="表格語意句結果", dataframe=pd.DataFrame(flat_records))
+    print(f"\n======= Table {table_ix + 1} =======")
+    if orientation == "horizontal" and len(sentences) == len(df):
+        df = df.copy()
+        df["sentence"] = sentences
+        print(df)
+    else:
+        print("🔹 表格為縱向或不規則格式，僅顯示語意句：")
+        for s in sentences:
+            print(" -", s)
