@@ -1,5 +1,57 @@
-from PIL import Image
-import numpy as np
+# ✅ 假設 conv_res 已經從 doc_converter.convert(...) 執行完畢
+# 此段程式將逐一取出每張表格，使用 table_to_sentences 將其轉為語意句並印出
 
-img = Image.open(element_image_filename)
-ocr_result = self.reader.readtext(np.array(img))
+from typing import List
+
+def table_to_sentences(df: pd.DataFrame, orientation: str = "auto") -> List[str]:
+    def is_vertical(df):
+        first_col = df.iloc[:, 0]
+        score = 0
+        for val in first_col[: min(5, len(first_col))]:
+            if isinstance(val, str) and len(val) <= 15 and not any(char.isdigit() for char in val):
+                score += 1
+        return score >= 0.6 * min(5, len(first_col))
+
+    sentences = []
+    if orientation == "auto":
+        orientation = "vertical" if is_vertical(df) else "horizontal"
+
+    if orientation == "horizontal":
+        for idx, row in df.iterrows():
+            line = []
+            for col, val in row.items():
+                if pd.notna(val) and str(val).strip() != "":
+                    line.append(f"{col.strip()}: {str(val).strip()}")
+            if line:
+                sentences.append("; ".join(line))
+
+    elif orientation == "vertical":
+        header = df.columns.tolist()
+        for row in df.itertuples(index=False):
+            key = str(row[0]).strip()
+            for i in range(1, len(row)):
+                value = row[i]
+                if pd.notna(value) and str(value).strip() != "":
+                    col_name = header[i]
+                    sentences.append(f"{key} - {col_name}: {str(value).strip()}")
+
+    return sentences
+
+# 🔍 逐一處理每張表格，轉為語意句並列印
+all_table_sentences = []
+
+for table_ix, table in enumerate(conv_res.document.tables):
+    table_df: pd.DataFrame = table.export_to_dataframe()
+    sentences = table_to_sentences(table_df)
+    all_table_sentences.append({
+        "table_index": table_ix + 1,
+        "sentences": sentences
+    })
+
+# 展開成表格顯示
+flat_records = []
+for entry in all_table_sentences:
+    for s in entry["sentences"]:
+        flat_records.append({"Table #": entry["table_index"], "Sentence": s})
+
+import ace_tools as tools; tools.display_dataframe_to_user(name="表格語意句結果", dataframe=pd.DataFrame(flat_records))
