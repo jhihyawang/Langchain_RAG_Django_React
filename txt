@@ -1,22 +1,56 @@
-def cleanup_page_resources(self, local_vars: dict):
-    import gc
-    import torch
-    from PIL import Image
+from typing import List
+import pandas as pd
 
-    keys_to_delete = ["conv_res", "page", "image", "summary", "element", "element_image_filename", "df", "sentences"]
-    for k in keys_to_delete:
-        if k in local_vars:
-            val = local_vars[k]
-            try:
-                if isinstance(val, Image.Image):
-                    val.close()
-                del val
-            except Exception as e:
-                print(f"⚠️ 無法清除變數 {k}: {e}")
+def table_to_sentences(self,table: TableItem) -> List[str]:
+    """
+    根據 TableItem 中的表格內容產生語意句清單。
+    """
+    df = table.export_to_dataframe()
+    if df.empty:
+        return []
 
-    gc.collect()  # 🔄 釋放 Python 記憶體
+    def is_vertical(df: pd.DataFrame) -> bool:
+        # 判斷是否為左側直向表頭（第一欄是標題）
+        first_col = df.iloc[:, 0]
+        score = 0
+        for val in first_col[: min(5, len(first_col))]:
+            if isinstance(val, str) and len(val) <= 10 and not any(char.isdigit() for char in val):
+                score += 1
+        return score >= 0.6 * min(5, len(first_col))
 
-    # 🧠 釋放 CUDA/GPU 記憶體
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+    orientation = "vertical" if is_vertical(df) else "horizontal"
+    sentences = []
+
+    if orientation == "horizontal":
+        for idx, row in df.iterrows():
+            parts = []
+            for col, val in row.items():
+                if pd.notna(val) and str(val).strip():
+                    parts.append(f"{col.strip()}為{str(val).strip()}")
+            if parts:
+                sentences.append("，".join(parts) + "。")
+
+    else:  # vertical
+        headers = df.columns.tolist()
+        for row in df.itertuples(index=False):
+            key = str(row[0]).strip()
+            for i in range(1, len(row)):
+                val = row[i]
+                if pd.notna(val) and str(val).strip():
+                    col_name = headers[i]
+                    sentences.append(f"{key}的{col_name}為{str(val).strip()}。")
+
+    return sentences
+
+
+for table in conv_res.document.tables:
+    sentences = self.table_to_sentences(table)
+    for s in sentences:
+        vectorstore.add(
+            content=s,
+            page=page_no,
+            document_id=doc_id,
+            media_type="table",
+            title=title,
+            source=image_path
+        )
