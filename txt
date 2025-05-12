@@ -1,54 +1,40 @@
-# 直接顯示每個表格的 DataFrame 並加上語意句欄位，不使用 ace_tools
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from FlagEmbedding import FlagReranker
 
-from typing import List
-import pandas as pd
+# 載入一次就好，可改為 class 層級屬性或 singleton
+reranker = FlagReranker('BAAI/bge-reranker-base', use_fp16=True)
 
-def table_to_sentences(df: pd.DataFrame, orientation: str = "auto") -> List[str]:
-    def is_vertical(df):
-        first_col = df.iloc[:, 0]
-        score = 0
-        for val in first_col[: min(5, len(first_col))]:
-            if isinstance(val, str) and len(val) <= 15 and not any(char.isdigit() for char in val):
-                score += 1
-        return score >= 0.6 * min(5, len(first_col))
+class QueryAPIView(APIView):
+    def post(self, request):
+        query = request.data.get("query", "")
+        document_id = request.data.get("document_id")  # optional
 
-    sentences = []
-    if orientation == "auto":
-        orientation = "vertical" if is_vertical(df) else "horizontal"
+        if not query:
+            return Response({"error": "請輸入問題"}, status=400)
 
-    if orientation == "horizontal":
-        for idx, row in df.iterrows():
-            line = []
-            for col, val in row.items():
-                if pd.notna(val) and str(val).strip() != "":
-                    line.append(f"{col.strip()}: {str(val).strip()}")
-            if line:
-                sentences.append("; ".join(line))
+        # 🔍 Step 1: 原始向量檢索
+        if document_id:
+            results = vectorstore.similarity_search(query, k=10, filter={"document_id": document_id})
+        else:
+            results = vectorstore.similarity_search(query, k=10)
 
-    elif orientation == "vertical":
-        header = df.columns.tolist()
-        for row in df.itertuples(index=False):
-            key = str(row[0]).strip()
-            for i in range(1, len(row)):
-                value = row[i]
-                if pd.notna(value) and str(value).strip() != "":
-                    col_name = header[i]
-                    sentences.append(f"{key} - {col_name}: {str(value).strip()}")
+        if not results:
+            return Response({"answer": "找不到相關內容。"})
 
-    return sentences
+        # 📊 Step 2: 用 reranker 重新排序
+        texts = [doc.page_content for doc in results]
+        scores = reranker.compute_score(query, texts)
+        reranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
 
-# 顯示每張表格的原始 df 加上語意句欄位
-for table_ix, table in enumerate(conv_res.document.tables):
-    df = table.export_to_dataframe()
-    orientation = "vertical" if df.shape[1] > df.shape[0] else "horizontal"
-    sentences = table_to_sentences(df, orientation=orientation)
+        top_chunks = [doc for doc, _ in reranked[:5]]  # 取前 5 段
+        context = "\n".join([doc.page_content for doc in top_chunks])
 
-    print(f"\n======= Table {table_ix + 1} =======")
-    if orientation == "horizontal" and len(sentences) == len(df):
-        df = df.copy()
-        df["sentence"] = sentences
-        print(df)
-    else:
-        print("🔹 表格為縱向或不規則格式，僅顯示語意句：")
-        for s in sentences:
-            print(" -", s)
+        # 💬 Step 3: 呼叫 LLM 回答（你可用 OpenAI / Ollama / ChatCompletion）
+        answer = llm.generate(context + "\n\n" + query)
+
+        return Response({
+            "answer": answer,
+            "chunks": [doc.page_content for doc in top_chunks],  # 可選回傳
+            "scores": [float(s) for _, s in reranked[:5]]
+        })
